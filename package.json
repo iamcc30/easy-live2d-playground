@@ -1,0 +1,66 @@
+{
+  "name": "vue3-ts-fast-dev",
+  "type": "module",
+  "version": "1.0.0",
+  "private": true,
+  "packageManager": "pnpm@10.7.1",
+  "description": "Panzer_Jack 的 通用Vue3项目模版",
+  "author": {
+    "name": "Panzer_Jack",
+    "email": "panzer_jack@panzer-jack.cn",
+    "url": "https://www.panzer-jack.cn"
+  },
+  "license": "MPL-2.0",
+  "keywords": [],
+  "main": "index.js",
+  "engines": {
+    "node": "^22.0.0"
+  },
+  "scripts": {
+    "preinstall": "npx only-allow pnpm",
+    "dev": "vite",
+    "build": "run-p type-check \"build-only {@}\" --",
+    "preview": "vite preview",
+    "test:unit": "vitest",
+    "build-only": "vite build",
+    "type-check": "vue-tsc --build",
+    "prepare": "husky install"
+  },
+  "dependencies": {
+    "@vueuse/core": "catalog:",
+    "pinia": "catalog:",
+    "vue": "catalog:",
+    "vue-router": "catalog:"
+  },
+  "devDependencies": {
+    "@antfu/eslint-config": "catalog:",
+    "@tsconfig/node22": "catalog:",
+    "@types/jsdom": "catalog:",
+    "@types/node": "catalog:",
+    "@unocss/eslint-plugin": "catalog:",
+    "@vitejs/plugin-vue": "catalog:",
+    "@vue/test-utils": "catalog:",
+    "@vue/tsconfig": "catalog:",
+    "bumpp": "catalog:",
+    "consola": "catalog:",
+    "eslint-plugin-format": "catalog:",
+    "husky": "catalog:",
+    "jsdom": "catalog:",
+    "lint-staged": "catalog:",
+    "npm-run-all2": "catalog:",
+    "typedoc": "catalog:",
+    "typescript": "catalog:",
+    "unocss": "catalog:",
+    "unplugin-auto-import": "catalog:",
+    "unplugin-vue-components": "catalog:",
+    "vite": "catalog:",
+    "vite-plugin-vue-devtools": "catalog:",
+    "vitest": "catalog:",
+    "vue-tsc": "catalog:"
+  },
+  "lint-staged": {
+    "*.{js,ts,vue}": [
+      "eslint --fix"
+    ]
+  }
+}
