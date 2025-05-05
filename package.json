@@ -20,7 +20,7 @@
   ],
   "main": "index.js",
   "engines": {
-    "node": "^22.0.0"
+    "node": "^18.0.0 || >=20.0.0"
   },
   "scripts": {
     "preinstall": "npx only-allow pnpm",
