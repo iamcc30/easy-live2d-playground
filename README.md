@@ -1,12 +1,13 @@
 # Easy Live2D Playground
 
 这是一个在线体验 easy-live2d 库的交互式演示平台。
+你能够直接用这个 云IDE [StackBlitz](https://stackblitz.com/~/github.com/Panzer-Jack/easy-live2d-playground) 在你的浏览器上直接体验。
 
 ## 项目介绍
 
 Easy Live2D Playground 是一个基于 Vue 3 和 TypeScript 构建的应用，用于展示和测试 easy-live2d 库的功能。通过该平台，用户可以直观地了解和体验 Live2D 模型在 Web 环境下的交互效果。
 
-[easy-live2d 仓库地址](https://github.com/Panzer-Jack/easy-live2d)
+easy-live2d：[仓库地址](https://github.com/Panzer-Jack/easy-live2d)
 
 ## 特性
 
@@ -23,9 +24,6 @@ Easy Live2D Playground 是一个基于 Vue 3 和 TypeScript 构建的应用，�
 - Vite
 - easy-live2d
 - PixiJS
-- Pinia
-- Vue Router
-- UnoCSS
 
 ## 项目结构
 
