@@ -87,42 +87,34 @@ pnpm test:unit
 以下是初始化 Live2D 模型的基本示例：
 
 ```typescript
-import { Config, Live2DSprite, LogLevel } from 'easy-live2d'
-import { Application, Ticker } from 'pixi.js'
+  import { Application, Ticker } from 'pixi.js';
+  import { Live2DSprite, Config, Priority } from 'easy-live2d';
 
-// 设置全局配置
-Config.MotionGroupIdle = 'Idle' // 设置默认的空闲动作组
-Config.CubismLoggingLevel = LogLevel.LogLevel_Off // 设置日志级别
+  // Configure basic settings
+  Config.MotionGroupIdle = 'Idle'; // Set default idle motion group
+  Config.MouseFollow = false; // Disable mouse following
+  // Create Live2D sprite
+  const live2dSprite = new Live2DSprite();
+  live2dSprite.init({
+    modelPath: '/Resources/Hiyori/Hiyori.model3.json',
+    ticker: Ticker.shared
+  });
 
-// 创建Live2D精灵并初始化
-const live2DSprite = new Live2DSprite()
-live2DSprite.init({
-  modelPath: '/Resources/Hiyori/Hiyori.model3.json',
-  ticker: Ticker.shared
-})
-
-// 监听点击事件
-live2DSprite.onLive2D('hit', ({ hitAreaName, x, y }) => {
-  console.log('hit', hitAreaName, x, y)
-})
-
-// 添加到PixiJS应用
-const app = new Application()
-app.init({
-  view: canvasElement,
-  backgroundAlpha: 0, // 透明背景
-})
-app.stage.addChild(live2DSprite)
-
-// 设置表情
-live2DSprite.setExpression({
-  expressionId: 'normal',
-})
-
-// 释放资源
-onUnmounted(() => {
-  live2DSprite.destroy()
-})
+  const init = async () => {
+    // Create application
+    const app = new Application();
+    await app.init({
+      view: document.getElementById('live2d'),
+      backgroundAlpha: 0, // Set alpha to 0 for transparency if needed
+    });
+    // Live2D sprite size
+    live2DSprite.width = canvasRef.value.clientWidth * window.devicePixelRatio
+    live2DSprite.height = canvasRef.value.clientHeight * window.devicePixelRatio
+    // Add to stage
+    app.stage.addChild(live2dSprite);
+    console.log('easy-live2d initialized successfully!');
+  }
+  init()
 ```
 
 ## 许可证
