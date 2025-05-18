@@ -45,6 +45,23 @@ onMounted(async () => {
       expressionId: 'normal',
     })
 
+    // 播放声音
+    live2DSprite.playVoice({
+      // 当前音嘴同步 仅支持wav格式
+      voicePath: '/Resources/Hiyori/sounds/test3.wav',
+    })
+
+    // 停止声音
+    // live2DSprite.stopVoice()
+
+    setTimeout(() => {
+      // 播放声音
+      live2DSprite.playVoice({
+        voicePath: '/Resources/Hiyori/sounds/test.wav',
+        immediate: true // 是否立即播放: 默认为true，会把当前正在播放的声音停止并立即播放新的声音
+      })
+    }, 10000)
+
     // live2DSprite.startMotion({
     //   group: 'test',
     //   no: 0,
