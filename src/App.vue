@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Config, Live2DSprite, LogLevel } from 'easy-live2d'
+import { Config, CubismSetting, Live2DSprite, LogLevel } from 'easy-live2d'
 import { Application, Ticker } from 'pixi.js'
 import { onMounted, onUnmounted, ref } from 'vue'
 
@@ -30,6 +30,16 @@ live2DSprite.onLive2D('hit', ({ hitAreaName, x, y }) => {
 // })
 
 onMounted(async () => {
+  // 你同时又可以直接这样初始化
+  // const model2Json = await (await fetch('/Resources/Hiyori/Hiyori.model3.json')).json()
+  // const modelSetting = new CubismSetting({
+  //   prefixPath: '/Resources/Hiyori/',
+  //   modelJSON: model2Json,
+  // })
+  // live2DSprite.init({
+  //   modelSetting,
+  //   ticker: Ticker.shared,
+  // })
   await app.init({
     view: canvasRef.value,
     backgroundAlpha: 0, // 如果需要透明，可以设置alpha为0
