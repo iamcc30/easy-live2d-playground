@@ -13,7 +13,7 @@ importers:
         version: 13.0.0(vue@3.5.13(typescript@5.8.3))
       easy-live2d:
         specifier: ^0.3.2
-        version: 0.3.2(pixi.js@8.9.2)
+        version: 0.3.3(pixi.js@8.9.2)
       pinia:
         specifier: ^3.0.1
         version: 3.0.1(typescript@5.8.3)(vue@3.5.13(typescript@5.8.3))
@@ -1603,8 +1603,8 @@ packages:
   eastasianwidth@0.2.0:
     resolution: {integrity: sha512-I88TYZWc9XiYHRQ4/3c5rjjfgkjhLyW2luGIheGERbNQ6OY7yTybanSpDXZa8y7VUP9YmDcYa+eyq4ca7iLqWA==}
 
-  easy-live2d@0.3.2:
-    resolution: {integrity: sha512-OUsvvqiNNwxWiUywx7dt6VX9+M+ZDdDHDAuYz5c9ZQrN5amg4vnW6bK8+cDrFm6alDornl8tODF8YPFVlYa79w==}
+  easy-live2d@0.3.3:
+    resolution: {integrity: sha512-MT8fe2D/vBhYQARlSRxB6WfHNVRO90w1LD02TneRojmbEvJprKlK4hBgZfD0iUAI2eU4WqcAVcN4otY3k0z/aw==}
     engines: {node: ^18.0.0 || >=20.0.0}
 
   editorconfig@1.0.4:
@@ -5037,7 +5037,7 @@ snapshots:
 
   eastasianwidth@0.2.0: {}
 
-  easy-live2d@0.3.2(pixi.js@8.9.2):
+  easy-live2d@0.3.3(pixi.js@8.9.2):
     dependencies:
       '@pixi/sound': 6.0.1(pixi.js@8.9.2)
     transitivePeerDependencies:
