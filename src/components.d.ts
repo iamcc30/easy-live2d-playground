@@ -8,6 +8,19 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
+    AnimeChatHistory: typeof import('./components/AnimeChatHistory.vue')['default']
+    AnimeChatInterface: typeof import('./components/AnimeChatInterface.vue')['default']
+    AnimeChatMessage: typeof import('./components/AnimeChatMessage.vue')['default']
+    AnimeVoiceControls: typeof import('./components/AnimeVoiceControls.vue')['default']
+    ChatHistory: typeof import('./components/ChatHistory.vue')['default']
+    ChatInterface: typeof import('./components/ChatInterface.vue')['default']
+    ChatMessage: typeof import('./components/ChatMessage.vue')['default']
+    ErrorNotification: typeof import('./components/ErrorNotification.vue')['default']
+    FloatingChatInterface: typeof import('./components/FloatingChatInterface.vue')['default']
+    FloatingChatMessage: typeof import('./components/FloatingChatMessage.vue')['default']
+    FloatingElements: typeof import('./components/FloatingElements.vue')['default']
+    FloatingParticles: typeof import('./components/FloatingParticles.vue')['default']
+    FloatingVoiceControls: typeof import('./components/FloatingVoiceControls.vue')['default']
     HelloWorld: typeof import('./components/HelloWorld.vue')['default']
     IconCommunity: typeof import('./components/icons/IconCommunity.vue')['default']
     IconDocumentation: typeof import('./components/icons/IconDocumentation.vue')['default']
@@ -17,6 +30,7 @@ declare module 'vue' {
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
     TheWelcome: typeof import('./components/TheWelcome.vue')['default']
+    VoiceControls: typeof import('./components/VoiceControls.vue')['default']
     WelcomeItem: typeof import('./components/WelcomeItem.vue')['default']
   }
 }
