@@ -14,7 +14,8 @@ Config.CubismLoggingLevel = LogLevel.LogLevel_Off // 设置日志级别
 // 创建Live2D精灵 并初始化
 const live2DSprite = new Live2DSprite()
 live2DSprite.init({
-  modelPath: '/Resources/Hiyori/Hiyori.model3.json',
+  // modelPath: '/Resources/Hiyori/Hiyori.model3.json',
+  modelPath: '/Resources/miara_pro_en/runtime/miara_pro_t03.model3.json',
   ticker: Ticker.shared,
 })
 
