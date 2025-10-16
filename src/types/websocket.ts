@@ -1,7 +1,9 @@
 /**
- * Websocket Protocol Type Definitions
- * Based on Websocket连接.md specification
+ * Socket.IO Protocol Type Definitions
+ * Based on Websocket连接.md specification, migrated to Socket.IO
  */
+
+import type { Socket } from 'socket.io-client'
 
 // Audio parameters configuration
 export interface AudioParams {
@@ -15,7 +17,7 @@ export interface AudioParams {
 export interface HelloMessage {
   type: 'hello'
   version?: number
-  transport: 'websocket'
+  transport: 'socketio'
   features?: {
     mcp: boolean
   }
@@ -76,7 +78,7 @@ export type WebsocketMessage =
   | MCPMessage
   | LLMMessage
 
-// Connection configuration
+// Socket.IO connection configuration
 export interface WebsocketConfig {
   url: string
   accessToken: string
@@ -86,6 +88,9 @@ export interface WebsocketConfig {
   reconnect: boolean
   reconnectInterval: number
   reconnectMaxAttempts: number
+  // Socket.IO specific options
+  path?: string
+  transports?: ('websocket' | 'polling')[]
 }
 
 // Connection state
@@ -107,6 +112,9 @@ export interface WebsocketEventHandlers {
   onAudioData?: (data: ArrayBuffer) => void
   onError?: (error: Error) => void
 }
+
+// Socket.IO instance type export
+export type SocketInstance = Socket
 
 // Audio recording configuration
 export interface AudioRecordingConfig {
