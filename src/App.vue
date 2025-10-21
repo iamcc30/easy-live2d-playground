@@ -6,6 +6,7 @@ import { useChatStore } from '@/stores/chat'
 import { lipSyncService } from '@/utils/lipSync'
 import FloatingChatInterface from '@/components/FloatingChatInterface.vue'
 import ErrorNotification from '@/components/ErrorNotification.vue'
+import AudioDiagnostics from '@/components/AudioDiagnostics.vue'
 
 const chatStore = useChatStore()
 const canvasRef = ref<HTMLCanvasElement>()
@@ -248,6 +249,11 @@ onUnmounted(() => {
 
   <!-- 错误通知组件 -->
   <ErrorNotification />
+
+  <!-- 音频诊断面板 (按 Ctrl+D 或 Cmd+D 显示) -->
+  <div class="diagnostics-overlay">
+    <AudioDiagnostics />
+  </div>
 </template>
 
 <style>
@@ -512,6 +518,24 @@ onUnmounted(() => {
 
   .floating-chat-overlay {
     width: 520px;
+  }
+}
+
+/* 诊断面板覆盖层 */
+.diagnostics-overlay {
+  position: fixed;
+  bottom: 20px;
+  left: 20px;
+  z-index: 2000;
+  max-width: 600px;
+}
+
+@media (max-width: 768px) {
+  .diagnostics-overlay {
+    bottom: 10px;
+    left: 10px;
+    right: 10px;
+    max-width: none;
   }
 }
 </style>

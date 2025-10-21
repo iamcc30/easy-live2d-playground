@@ -196,9 +196,14 @@ export const useChatStore = defineStore('chat', () => {
       return
     }
 
+    console.log('🎙️ Starting voice listen with mode:', mode)
+    console.log('📡 WebSocket connection state:', websocketService.getConnectionState())
+    console.log('🔌 WebSocket ready state:', websocketService.isConnected())
+
     try {
       // Start recording (now async with OPUS encoder initialization)
       await audioRecordingService.startRecording((audioData) => {
+        console.log(`🔊 Audio callback triggered: ${audioData.byteLength} bytes`)
         websocketService.sendAudioData(audioData)
       })
 
@@ -207,11 +212,12 @@ export const useChatStore = defineStore('chat', () => {
       listenMode.value = mode
       isListening.value = true
 
-      console.log('🎤 Started voice listening')
+      console.log('✅ Voice listening started successfully')
     }
     catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error'
       errorHandler.showErrorMessage('启动录音失败', errorMessage)
+      console.error('❌ Failed to start voice listening:', error)
       throw error
     }
   }

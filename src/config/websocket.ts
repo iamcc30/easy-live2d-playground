@@ -1,19 +1,18 @@
 import type { WebsocketConfig, AudioRecordingConfig } from '@/types/websocket'
 
 /**
- * Socket.IO Configuration
+ * WebSocket Configuration
  * Update these values based on your server configuration
  *
- * Path Configuration Options:
- * 1. Use URL path: VITE_WS_URL=http://server.com/custom-path (recommended)
- * 2. Use config.path: Set path property below
- * 3. Use Socket.IO default: VITE_WS_URL=http://server.com (uses /socket.io)
+ * Authentication is passed via URL query parameters:
+ * - token: Access token for authentication
+ * - deviceId: Unique device identifier
+ * - clientId: Unique client identifier
+ * - protocolVersion: Protocol version number
  */
 export const websocketConfig: WebsocketConfig = {
-  // Socket.IO server URL
-  // Examples:
-  //   - With path: 'http://server.com/api/ws' -> connects to /api/ws
-  //   - Without path: 'http://server.com' -> connects to /socket.io (Socket.IO default)
+  // WebSocket server URL
+  // Example: 'http://server.com:8888' will connect to 'ws://server.com:8888'
   url: import.meta.env.VITE_WS_URL || 'https://your-server.com',
 
   // Access token (should be obtained from authentication service)
@@ -31,25 +30,25 @@ export const websocketConfig: WebsocketConfig = {
   reconnectInterval: 3000, // 3 seconds
   reconnectMaxAttempts: 10,
 
-  // Socket.IO specific options
-  // Path configuration:
-  //   - ''           = Use Socket.IO default (/socket.io)
-  //   - '/'          = Use root path (no /socket.io prefix)
-  //   - '/custom'    = Use custom path
-  //   - undefined    = Use path from URL (if provided)
-  path: '/', // Override Socket.IO default, connect to root path
-  transports: ['websocket', 'polling'] // Try WebSocket first, fallback to polling
+  // Legacy options (kept for backwards compatibility, not used in native WebSocket)
+  path: '/',
+  transports: ['websocket', 'polling'],
 }
 
 /**
  * Audio Recording Configuration
  * Based on protocol specification
+ *
+ * IMPORTANT: Currently using PCM format instead of OPUS
+ * - WebCodecs API produces raw OPUS frames (no container)
+ * - Server expects OPUS in OGG container
+ * - PCM avoids format mismatch issues
  */
 export const audioRecordingConfig: AudioRecordingConfig = {
   sampleRate: 16000, // 16kHz
   channels: 1, // Mono
   frameDuration: 60, // 60ms
-  format: 'opus'
+  format: 'opus'  // Note: Actually sending PCM due to server compatibility
 }
 
 /**
@@ -57,7 +56,7 @@ export const audioRecordingConfig: AudioRecordingConfig = {
  * Server TTS audio parameters
  */
 export const audioPlaybackConfig = {
-  sampleRate: 24000, // 24kHz (server response)
+  sampleRate: 16000, // 24kHz (server response)
   channels: 1, // Mono
   frameDuration: 60 // 60ms
 }

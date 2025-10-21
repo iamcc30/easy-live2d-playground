@@ -1,18 +1,78 @@
 import { audioPlaybackConfig } from '@/config/websocket'
 import { errorHandler } from '@/utils/errorHandler'
 import { lipSyncService } from '@/utils/lipSync'
+import { WebCodecsAudioDecoder } from './webCodecsDecoder'
 
 /**
  * Audio Playback Service for TTS
  * Handles OPUS-encoded audio playback from server
+ * Supports both container formats (OGG/WebM) and raw OPUS frames
+ *
+ * Architecture: Dual-Queue with Async Decode Pipeline
+ * - Encoded Queue: Raw OPUS data from server
+ * - Decoded Queue: PCM AudioBuffer ready for playback
+ * - Background decoder: Continuously decodes from encoded to decoded queue
  */
 export class AudioPlaybackService {
   private audioContext: AudioContext | null = null
-  private audioQueue: ArrayBuffer[] = []
+
+  // Dual-queue architecture
+  private encodedQueue: ArrayBuffer[] = []        // Raw OPUS data
+  private decodedQueue: AudioBuffer[] = []        // Decoded PCM audio
+
   private isPlaying = false
   private currentSource: AudioBufferSourceNode | null = null
   private onPlayCallback: (() => void) | null = null
   private onEndCallback: (() => void) | null = null
+
+  // WebCodecs decoder for OPUS frames
+  private webCodecsDecoder: WebCodecsAudioDecoder | null = null
+
+  // Async decode pipeline control
+  private isDecoding = false                      // Decode pipeline active
+  private shouldStopDecoding = false              // Signal to stop decode pipeline
+
+  // Audio scheduling for seamless playback
+  private nextStartTime = 0  // Next audio chunk start time in AudioContext time
+  private scheduleAheadTime = 0.1  // Schedule 100ms ahead for balance between responsiveness and stability
+
+  // Buffering configuration (Optimized for SMALL CHUNKS from server)
+  // Server is sending very small chunks (per-word), need aggressive merging
+  private bufferConfig = {
+    // Encoded queue thresholds
+    encodedMinChunks: 20,       // 12 → 20 Wait for MORE small chunks before decoding
+    encodedMaxChunks: 80,       // 60 → 80 Allow more small chunks to accumulate
+
+    // Decoded queue thresholds (CRITICAL - optimized for small chunk scenario)
+    decodedMinChunks: 40,       // 35 → 40 EVEN HIGHER for small chunks
+    decodedMaxChunks: 80,       // 60 → 80 More room for small decoded chunks
+
+    minBytes: 12288,            // 12 KB minimum buffer
+    timeoutMs: 12000,           // 8s → 12s VERY PATIENT for small chunks
+    rebufferThreshold: 15,      // 12 → 15 HIGHER to prevent pauses
+
+    // Concatenation settings - AGGRESSIVE MERGING for small chunks
+    maxConcatBuffers: 8,         // 1 → 8 MERGE multiple small chunks
+    minConcatBuffers: 5          // 1 → 5 Always merge at least 5 chunks
+  }
+  private bufferTimeout: ReturnType<typeof setTimeout> | null = null
+  private isBuffering = false
+
+  // Playback statistics
+  private playbackStats = {
+    totalEncodedChunks: 0,
+    totalDecodedChunks: 0,
+    successfulDecodes: 0,
+    failedDecodes: 0,
+    totalBytes: 0,
+    totalDuration: 0,
+    // NEW: Performance monitoring
+    stutterCount: 0,              // Number of times playback paused for rebuffering
+    lastStutterTime: 0,           // Timestamp of last stutter
+    avgDecodeTime: 0,             // Average decode time per chunk
+    avgConcatCount: 0,            // Average buffers concatenated per playback
+    totalPlaybackCalls: 0         // Total number of playNext calls
+  }
 
   /**
    * Initialize audio playback
@@ -20,9 +80,48 @@ export class AudioPlaybackService {
   async initialize(): Promise<void> {
     try {
       // Create audio context
-      this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({
-        sampleRate: audioPlaybackConfig.sampleRate
+      // NOTE: Don't specify sampleRate - let AudioContext use hardware's native rate
+      // This allows it to handle any sample rate from the decoder (16k, 24k, 48kHz, etc.)
+      this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)()
+
+      const sampleRate = this.audioContext.sampleRate
+      console.log(`✅ AudioContext created with sample rate: ${sampleRate}Hz`)
+
+      // Dynamic buffer adjustment based on sample rate
+      // Higher sample rates need larger buffers due to bigger chunk sizes
+      if (sampleRate >= 48000) {
+        // Already optimized for 48kHz in default config
+        console.log('📊 Using 48kHz-optimized buffer configuration')
+      } else if (sampleRate >= 24000) {
+        // 24kHz needs medium buffers
+        this.bufferConfig.decodedMinChunks = 15
+        this.bufferConfig.decodedMaxChunks = 40
+        this.bufferConfig.rebufferThreshold = 10
+        this.bufferConfig.maxConcatBuffers = 6
+        console.log('📊 Adjusted buffer configuration for 24kHz playback')
+      } else {
+        // 16kHz or lower can use smaller buffers
+        this.bufferConfig.decodedMinChunks = 12
+        this.bufferConfig.decodedMaxChunks = 35
+        this.bufferConfig.rebufferThreshold = 8
+        this.bufferConfig.maxConcatBuffers = 5
+        console.log('📊 Adjusted buffer configuration for 16kHz playback')
+      }
+
+      console.log('🔧 Active buffer config:', {
+        decodedMinChunks: this.bufferConfig.decodedMinChunks,
+        decodedMaxChunks: this.bufferConfig.decodedMaxChunks,
+        rebufferThreshold: this.bufferConfig.rebufferThreshold
       })
+
+      // Initialize WebCodecs decoder
+      // Pass expected sampleRate for reference, but decoder will auto-detect from stream
+      this.webCodecsDecoder = new WebCodecsAudioDecoder(
+        audioPlaybackConfig.sampleRate,
+        1 // mono
+      )
+      await this.webCodecsDecoder.initialize()
+      console.log('✅ WebCodecs AudioDecoder initialized')
 
       console.log('✅ Audio playback initialized')
     }
@@ -34,7 +133,8 @@ export class AudioPlaybackService {
   }
 
   /**
-   * Add audio data to playback queue
+   * Add audio data to encoded queue
+   * Triggers async decode pipeline if needed
    */
   async addAudioData(data: ArrayBuffer): Promise<void> {
     if (!this.audioContext) {
@@ -43,12 +143,61 @@ export class AudioPlaybackService {
     }
 
     try {
-      // Add to queue
-      this.audioQueue.push(data)
+      // Check max buffer size to prevent memory overflow
+      if (this.encodedQueue.length >= this.bufferConfig.encodedMaxChunks) {
+        console.warn(`⚠️ Encoded buffer overflow: queue has ${this.encodedQueue.length} chunks (max: ${this.bufferConfig.encodedMaxChunks}), dropping oldest chunk`)
+        this.encodedQueue.shift() // Remove oldest chunk
+      }
 
-      // Start playback if not already playing
+      // Add to encoded queue
+      this.encodedQueue.push(data)
+      this.playbackStats.totalEncodedChunks++
+      this.playbackStats.totalBytes += data.byteLength
+      console.log(`📥 Encoded chunk queued: ${data.byteLength} bytes, encoded queue: ${this.encodedQueue.length}, decoded queue: ${this.decodedQueue.length}`)
+
+      // Start async decode pipeline if not already running
+      if (!this.isDecoding && this.encodedQueue.length >= this.bufferConfig.encodedMinChunks) {
+        console.log('🔄 Starting async decode pipeline...')
+        this.startDecodePipeline()
+      }
+
+      // Check if we should start playback
       if (!this.isPlaying) {
-        await this.playNext()
+        const meetsDecodedThreshold = this.decodedQueue.length >= this.bufferConfig.decodedMinChunks
+
+        if (meetsDecodedThreshold) {
+          // Sufficient decoded buffers, start immediately
+          console.log(`✅ Decoded buffer ready (${this.decodedQueue.length} buffers), starting playback`)
+          this.isBuffering = false
+          if (this.bufferTimeout) {
+            clearTimeout(this.bufferTimeout)
+            this.bufferTimeout = null
+          }
+          await this.playNext()
+        } else {
+          // Wait for more decoded buffers or timeout
+          if (!this.isBuffering) {
+            this.isBuffering = true
+            console.log(`⏳ Buffering... (decoded: ${this.decodedQueue.length}/${this.bufferConfig.decodedMinChunks})`)
+
+            if (this.bufferTimeout) {
+              clearTimeout(this.bufferTimeout)
+            }
+
+            this.bufferTimeout = setTimeout(() => {
+              console.log(`⏰ Buffer timeout (${this.bufferConfig.timeoutMs}ms), starting playback with ${this.decodedQueue.length} decoded buffers`)
+              this.isBuffering = false
+              this.playNext()
+            }, this.bufferConfig.timeoutMs)
+          }
+        }
+      } else {
+        // Already playing, check if need to re-buffer
+        // IMPROVED: Only warn when queue is low, don't pause playback
+        // The playNext() logic will handle low buffers more gracefully
+        if (this.decodedQueue.length <= this.bufferConfig.rebufferThreshold && !this.isBuffering) {
+          console.log(`⚠️ Decoded queue low (${this.decodedQueue.length} buffers), decode pipeline should catch up...`)
+        }
       }
     }
     catch (error) {
@@ -57,38 +206,225 @@ export class AudioPlaybackService {
   }
 
   /**
-   * Play next audio buffer from queue
+   * Async decode pipeline - runs in background
+   * Continuously decodes from encoded queue to decoded queue
+   */
+  private async startDecodePipeline(): Promise<void> {
+    if (this.isDecoding) {
+      return
+    }
+
+    this.isDecoding = true
+    this.shouldStopDecoding = false
+
+    console.log('🎬 Decode pipeline started')
+
+    while (!this.shouldStopDecoding) {
+      // Check if we should continue decoding
+      if (this.encodedQueue.length === 0) {
+        // No more encoded data, stop pipeline
+        console.log('📭 Encoded queue empty, stopping decode pipeline')
+        break
+      }
+
+      // Check if decoded queue is full
+      if (this.decodedQueue.length >= this.bufferConfig.decodedMaxChunks) {
+        console.log(`⏸️ Decoded queue full (${this.decodedQueue.length}/${this.bufferConfig.decodedMaxChunks}), pausing decode pipeline`)
+        // IMPROVED: Wait less time before checking again for faster response
+        await new Promise(resolve => setTimeout(resolve, 10))  // 100ms → 10ms
+        continue
+      }
+
+      // Get next encoded chunk
+      const encodedData = this.encodedQueue.shift()!
+      console.log(`🔄 Decoding chunk: ${encodedData.byteLength} bytes, encoded queue: ${this.encodedQueue.length}, decoded queue: ${this.decodedQueue.length}`)
+
+      try {
+        // Decode audio data using WebCodecs AudioDecoder
+        const audioBuffer = await this.decodeWithWebCodecs(encodedData)
+        console.log('✅ WebCodecs decode successful', audioBuffer)
+
+        // Add to decoded queue
+        this.decodedQueue.push(audioBuffer)
+        this.playbackStats.totalDecodedChunks++
+        this.playbackStats.successfulDecodes++
+        this.playbackStats.totalDuration += audioBuffer.duration
+
+        console.log(`📤 Decoded buffer added to queue: ${audioBuffer.duration.toFixed(3)}s, decoded queue: ${this.decodedQueue.length}`)
+
+        // If playback is waiting for decoded buffers, trigger it
+        if (!this.isPlaying && this.decodedQueue.length >= this.bufferConfig.decodedMinChunks) {
+          console.log('🎵 Decoded buffer ready, triggering playback')
+          this.isBuffering = false
+          if (this.bufferTimeout) {
+            clearTimeout(this.bufferTimeout)
+            this.bufferTimeout = null
+          }
+          this.playNext()
+        }
+      }
+      catch (decodeError) {
+        console.error('❌ WebCodecs decode failed:', decodeError)
+
+        // Log audio format for debugging
+        const view = new Uint8Array(encodedData)
+        const header = Array.from(view.slice(0, 16))
+          .map(b => b.toString(16).padStart(2, '0'))
+          .join(' ')
+        console.error('Audio header (first 16 bytes):', header)
+        console.error('Data size:', encodedData.byteLength, 'bytes')
+
+        this.playbackStats.failedDecodes++
+        // Continue with next chunk
+      }
+
+      // Small yield to prevent blocking
+      await new Promise(resolve => setTimeout(resolve, 0))
+    }
+
+    this.isDecoding = false
+    console.log('🛑 Decode pipeline stopped')
+  }
+
+  /**
+   * Concatenate multiple AudioBuffers into a single AudioBuffer
+   * This creates a seamless audio stream from individual chunks
+   */
+  private concatenateAudioBuffers(buffers: AudioBuffer[]): AudioBuffer | null {
+    if (!this.audioContext || buffers.length === 0) {
+      return null
+    }
+
+    // All buffers should have the same sample rate and number of channels
+    const sampleRate = buffers[0].sampleRate
+    const numberOfChannels = buffers[0].numberOfChannels
+
+    // Calculate total length
+    const totalLength = buffers.reduce((sum, buffer) => sum + buffer.length, 0)
+
+    // Create new buffer with total length
+    const concatenated = this.audioContext.createBuffer(
+      numberOfChannels,
+      totalLength,
+      sampleRate
+    )
+
+    // Copy data from each buffer
+    let offset = 0
+    for (const buffer of buffers) {
+      for (let channel = 0; channel < numberOfChannels; channel++) {
+        const channelData = buffer.getChannelData(channel)
+        concatenated.getChannelData(channel).set(channelData, offset)
+      }
+      offset += buffer.length
+    }
+
+    const totalDuration = totalLength / sampleRate
+    console.log(`🔗 Concatenated ${buffers.length} buffers into ${totalDuration.toFixed(3)}s audio`)
+
+    return concatenated
+  }
+
+  /**
+   * Play next audio buffer from decoded queue
+   * Implements smart buffering and audio concatenation for seamless playback
    */
   private async playNext(): Promise<void> {
-    if (!this.audioContext || this.audioQueue.length === 0) {
+    if (!this.audioContext) {
+      this.isPlaying = false
+      this.onEndCallback?.()
+      return
+    }
+
+    // IMPROVED: Softer re-buffering logic - only pause if critically low and still decoding
+    // This reduces unnecessary pauses and allows playback to continue with available buffers
+    const isCriticallyLow = this.decodedQueue.length < 10  // Raised to 10 for small chunk scenario
+
+    if (isCriticallyLow && this.isDecoding) {
+      console.log(`⏸️ Pausing playback for re-buffering (critically low: ${this.decodedQueue.length} buffers)`)
+      this.isPlaying = false
+      this.isBuffering = true
+
+      // Track stutter for performance monitoring
+      this.playbackStats.stutterCount++
+      this.playbackStats.lastStutterTime = Date.now()
+      console.warn(`🚨 STUTTER #${this.playbackStats.stutterCount} detected - Queue critically low`)
+
+      // Wait for buffer to fill up again (VERY conservative for small chunks)
+      const checkBuffer = () => {
+        const targetBuffers = Math.max(25, this.bufferConfig.rebufferThreshold + 10)  // At least 25 buffers
+        if (this.decodedQueue.length >= targetBuffers || !this.isDecoding) {
+          console.log(`▶️ Resuming playback after re-buffering (${this.decodedQueue.length} buffers ready)`)
+          this.isBuffering = false
+          this.playNext()
+        } else {
+          setTimeout(checkBuffer, 100)
+        }
+      }
+      setTimeout(checkBuffer, 100)
+      return
+    }
+
+    // No more decoded buffers and no more encoding, stop playback
+    if (this.decodedQueue.length === 0) {
+      console.log('📭 Decoded queue empty, stopping playback')
       this.isPlaying = false
       this.onEndCallback?.()
       return
     }
 
     this.isPlaying = true
+    this.playbackStats.totalPlaybackCalls++
 
     try {
-      const audioData = this.audioQueue.shift()!
+      // Collect multiple buffers to concatenate for smoother playback
+      // IMPROVED: More stable concatenation strategy based on queue health
+      const buffersToPlay: AudioBuffer[] = []
+
+      // Determine optimal concatenation count based on queue health
+      // AGGRESSIVE MERGING: Always merge multiple small chunks to reduce playback overhead
+      let targetConcatCount: number
+      if (this.decodedQueue.length >= this.bufferConfig.decodedMinChunks) {
+        // Queue is healthy, use moderate concatenation
+        targetConcatCount = Math.min(this.bufferConfig.maxConcatBuffers, this.decodedQueue.length)
+      } else if (this.decodedQueue.length >= this.bufferConfig.minConcatBuffers) {
+        // Queue is getting low, still try to concatenate minimum amount
+        targetConcatCount = this.bufferConfig.minConcatBuffers
+      } else {
+        // Very low queue, play what we have (but minimum 1)
+        targetConcatCount = Math.max(1, this.decodedQueue.length)
+      }
+
+      // Update average concatenation count for monitoring
+      this.playbackStats.avgConcatCount =
+        (this.playbackStats.avgConcatCount * (this.playbackStats.totalPlaybackCalls - 1) + targetConcatCount) /
+        this.playbackStats.totalPlaybackCalls
+
+      for (let i = 0; i < targetConcatCount; i++) {
+        const buffer = this.decodedQueue.shift()
+        if (buffer) {
+          buffersToPlay.push(buffer)
+        }
+      }
+
+      console.log(`🎵 Concatenating ${buffersToPlay.length} buffers (${this.decodedQueue.length} remaining in queue)`)
+
+      // Concatenate buffers into one seamless audio
+      const audioBuffer = buffersToPlay.length === 1
+        ? buffersToPlay[0]  // Single buffer, no need to concatenate
+        : this.concatenateAudioBuffers(buffersToPlay)
+
+      if (!audioBuffer) {
+        console.error('❌ Failed to create audio buffer')
+        await this.playNext()
+        return
+      }
+
+      console.log(`🎵 Playing concatenated buffer: ${audioBuffer.duration.toFixed(3)}s, ${this.decodedQueue.length} buffers remaining`)
 
       // Resume audio context if suspended
       if (this.audioContext.state === 'suspended') {
         await this.audioContext.resume()
-      }
-
-      // Decode audio data
-      // Note: Browser expects the server to send OPUS data in a container format
-      // (like WebM or OGG) that browsers can decode, or raw PCM data
-      let audioBuffer: AudioBuffer
-
-      try {
-        // Try to decode as encoded audio (OPUS in WebM/OGG container)
-        audioBuffer = await this.audioContext.decodeAudioData(audioData.slice(0))
-      }
-      catch (decodeError) {
-        // If decoding fails, try to use as raw PCM data
-        console.warn('Failed to decode as encoded audio, trying PCM')
-        audioBuffer = await this.decodePCMAudio(audioData)
       }
 
       // Create audio source
@@ -103,50 +439,123 @@ export class AudioPlaybackService {
       // Setup lip sync with analyser
       this.setupLipSyncForPlayback(analyser)
 
-      // Setup playback end handler
-      this.currentSource.onended = () => {
-        this.currentSource = null
-        this.playNext()
+      // Calculate start time for seamless playback
+      const currentTime = this.audioContext.currentTime
+
+      // If this is the first chunk or playback has stopped, start immediately
+      if (this.nextStartTime === 0 || this.nextStartTime < currentTime) {
+        this.nextStartTime = currentTime + this.scheduleAheadTime
       }
 
-      // Start playback
-      this.currentSource.start()
+      // Setup playback end handler
+      this.currentSource.onended = () => {
+        console.log('✅ Concatenated chunk playback finished')
+        this.currentSource = null
+
+        // Continue playing next chunk (if available and buffer is sufficient)
+        if (this.decodedQueue.length > 0) {
+          // Start next chunk immediately for seamless transition
+          this.playNext()
+        } else {
+          // Decoded queue empty, reset timing for next playback session
+          this.nextStartTime = 0
+          this.isPlaying = false
+          this.onEndCallback?.()
+        }
+      }
+
+      // Start playback at scheduled time for seamless transitions
+      this.currentSource.start(this.nextStartTime)
       this.onPlayCallback?.()
 
-      console.log('🔊 Playing audio buffer')
+      // Update next start time (current start + duration)
+      this.nextStartTime += audioBuffer.duration
+
+      console.log(`🔊 Playing audio buffer at ${this.nextStartTime.toFixed(3)}s, ${audioBuffer.sampleRate}Hz, queue: ${this.decodedQueue.length}`)
+
+      // NOTE: Removed pre-scheduling logic as it may cause timing issues
+      // Now relying on onended callback for more predictable behavior
+
+      // Proactively prepare next chunk if queue is getting low but not critical
+      if (this.decodedQueue.length < this.bufferConfig.rebufferThreshold &&
+          this.decodedQueue.length >= this.bufferConfig.minConcatBuffers &&
+          this.isDecoding) {
+        console.log(`🔔 Queue notice: ${this.decodedQueue.length} buffers remaining (threshold: ${this.bufferConfig.rebufferThreshold})`)
+      }
     }
     catch (error) {
-      console.error('Failed to play audio:', error)
-      this.isPlaying = false
-      this.onEndCallback?.()
+      console.error('❌ Error in playNext, trying next buffer:', error)
+      // Continue with next buffer instead of stopping entire queue
+      await this.playNext()
     }
   }
 
   /**
-   * Decode raw PCM audio data
+   * Decode audio using WebCodecs AudioDecoder (for raw OPUS frames)
    */
-  private async decodePCMAudio(data: ArrayBuffer): Promise<AudioBuffer> {
-    if (!this.audioContext) {
-      throw new Error('Audio context not initialized')
+  private async decodeWithWebCodecs(audioData: ArrayBuffer): Promise<AudioBuffer> {
+    if (!this.webCodecsDecoder || !this.audioContext) {
+      throw new Error('WebCodecs decoder or AudioContext not available')
     }
 
-    // Convert ArrayBuffer to Int16Array (assuming PCM 16-bit)
-    const pcmData = new Int16Array(data)
+    return new Promise((resolve, reject) => {
+      let resolved = false
+      const timestamp = performance.now() * 1000 // Convert to microseconds
 
-    // Create audio buffer
-    const audioBuffer = this.audioContext.createBuffer(
-      audioPlaybackConfig.channels,
-      pcmData.length,
-      audioPlaybackConfig.sampleRate
-    )
+      // Set up one-time frame handler
+      this.webCodecsDecoder!.setOnFrameDecoded(async (audioDataFrame: AudioData) => {
+        if (resolved) {
+          audioDataFrame.close()
+          return
+        }
 
-    // Convert PCM Int16 to Float32 and fill buffer
-    const channelData = audioBuffer.getChannelData(0)
-    for (let i = 0; i < pcmData.length; i++) {
-      channelData[i] = pcmData[i] / 32768.0 // Normalize to -1.0 to 1.0
-    }
+        try {
+          // Convert AudioData to AudioBuffer
+          const audioBuffer = await this.webCodecsDecoder!.audioDataToAudioBuffer(
+            audioDataFrame,
+            this.audioContext!
+          )
 
-    return audioBuffer
+          // Close the frame to free memory
+          audioDataFrame.close()
+
+          resolved = true
+          resolve(audioBuffer)
+        }
+        catch (error) {
+          audioDataFrame.close()
+          if (!resolved) {
+            resolved = true
+            reject(error)
+          }
+        }
+      })
+
+      // Set up error handler
+      this.webCodecsDecoder!.setOnError((error: Error) => {
+        if (!resolved) {
+          resolved = true
+          reject(error)
+        }
+      })
+
+      // Start decoding
+      this.webCodecsDecoder!.decode(audioData, timestamp)
+        .catch(error => {
+          if (!resolved) {
+            resolved = true
+            reject(error)
+          }
+        })
+
+      // Timeout after 5 seconds
+      setTimeout(() => {
+        if (!resolved) {
+          resolved = true
+          reject(new Error('WebCodecs decode timeout after 5s'))
+        }
+      }, 5000)
+    })
   }
 
   /**
@@ -160,9 +569,12 @@ export class AudioPlaybackService {
   }
 
   /**
-   * Stop playback
+   * Stop playback and decode pipeline
    */
   stop(): void {
+    // Stop decode pipeline
+    this.shouldStopDecoding = true
+
     if (this.currentSource) {
       try {
         this.currentSource.stop()
@@ -173,22 +585,36 @@ export class AudioPlaybackService {
       }
     }
 
-    // Clear queue
-    this.audioQueue = []
+    // Clear buffer timeout
+    if (this.bufferTimeout) {
+      clearTimeout(this.bufferTimeout)
+      this.bufferTimeout = null
+    }
+
+    // Clear queues and reset timing
+    this.encodedQueue = []
+    this.decodedQueue = []
     this.isPlaying = false
+    this.isDecoding = false
+    this.nextStartTime = 0  // Reset timing for next playback session
 
     // Stop lip sync
     lipSyncService.stopLipSync()
 
-    console.log('🛑 Playback stopped')
+    console.log('🛑 Playback and decode pipeline stopped')
   }
 
   /**
-   * Clear audio queue
+   * Clear both audio queues
    */
   clearQueue(): void {
-    this.audioQueue = []
-    console.log('🧹 Audio queue cleared')
+    this.encodedQueue = []
+    this.decodedQueue = []
+    if (this.bufferTimeout) {
+      clearTimeout(this.bufferTimeout)
+      this.bufferTimeout = null
+    }
+    console.log('🧹 Audio queues cleared (encoded + decoded)')
   }
 
   /**
@@ -204,6 +630,12 @@ export class AudioPlaybackService {
    */
   dispose(): void {
     this.stop()
+
+    // Close WebCodecs decoder
+    if (this.webCodecsDecoder) {
+      this.webCodecsDecoder.close()
+      this.webCodecsDecoder = null
+    }
 
     if (this.audioContext && this.audioContext.state !== 'closed') {
       this.audioContext.close()
@@ -224,7 +656,21 @@ export class AudioPlaybackService {
    * Get queue length
    */
   getQueueLength(): number {
-    return this.audioQueue.length
+    return this.decodedQueue.length
+  }
+
+  /**
+   * Get encoded queue length
+   */
+  getEncodedQueueLength(): number {
+    return this.encodedQueue.length
+  }
+
+  /**
+   * Get decoded queue length
+   */
+  getDecodedQueueLength(): number {
+    return this.decodedQueue.length
   }
 
   /**
@@ -232,6 +678,74 @@ export class AudioPlaybackService {
    */
   getAudioContextState(): AudioContextState | null {
     return this.audioContext?.state || null
+  }
+
+  /**
+   * Get playback statistics for debugging
+   */
+  getPlaybackStats() {
+    const encodedBytes = this.encodedQueue.reduce((sum, chunk) => sum + chunk.byteLength, 0)
+
+    return {
+      ...this.playbackStats,
+      encodedQueueLength: this.encodedQueue.length,
+      decodedQueueLength: this.decodedQueue.length,
+      encodedQueueBytes: encodedBytes,
+      isPlaying: this.isPlaying,
+      isDecoding: this.isDecoding,
+      isBuffering: this.isBuffering,
+      audioContextState: this.audioContext?.state,
+      bufferConfig: { ...this.bufferConfig },
+      decodeSuccessRate: this.playbackStats.totalEncodedChunks > 0
+        ? (this.playbackStats.successfulDecodes / this.playbackStats.totalEncodedChunks * 100).toFixed(1) + '%'
+        : '0%',
+      // NEW: Performance metrics
+      stutterRate: this.playbackStats.totalPlaybackCalls > 0
+        ? (this.playbackStats.stutterCount / this.playbackStats.totalPlaybackCalls * 100).toFixed(1) + '%'
+        : '0%',
+      avgConcatCount: this.playbackStats.avgConcatCount.toFixed(2),
+      timeSinceLastStutter: this.playbackStats.lastStutterTime > 0
+        ? ((Date.now() - this.playbackStats.lastStutterTime) / 1000).toFixed(1) + 's'
+        : 'N/A'
+    }
+  }
+
+  /**
+   * Get buffer configuration
+   */
+  getBufferConfig() {
+    return { ...this.bufferConfig }
+  }
+
+  /**
+   * Update buffer configuration
+   */
+  setBufferConfig(config: Partial<typeof this.bufferConfig>): void {
+    this.bufferConfig = {
+      ...this.bufferConfig,
+      ...config
+    }
+    console.log('🔧 Buffer configuration updated:', this.bufferConfig)
+  }
+
+  /**
+   * Reset playback statistics
+   */
+  resetStats() {
+    this.playbackStats = {
+      totalEncodedChunks: 0,
+      totalDecodedChunks: 0,
+      successfulDecodes: 0,
+      failedDecodes: 0,
+      totalBytes: 0,
+      totalDuration: 0,
+      stutterCount: 0,
+      lastStutterTime: 0,
+      avgDecodeTime: 0,
+      avgConcatCount: 0,
+      totalPlaybackCalls: 0
+    }
+    console.log('📊 Playback statistics reset')
   }
 }
 

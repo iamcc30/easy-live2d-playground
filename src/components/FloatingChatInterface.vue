@@ -15,6 +15,10 @@ const isFloating = ref(true)
 const isMobile = ref(false)
 const useWebsocket = ref(true) // Toggle between Websocket and local speech
 
+// 监听模式
+const listenMode = ref<'auto' | 'manual' | 'realtime'>('auto')
+const showModeSelector = ref(false)
+
 // 语音识别相关
 const isRecognitionAvailable = computed(() => speechService.isRecognitionSupported())
 
@@ -80,70 +84,6 @@ const sendMessage = async () => {
 
   // 滚动到底部
   await scrollToBottom()
-
-  // 模拟AI回复，添加浮动效果
-  setTimeout(async () => {
-    const aiResponse = generateAIFloatingResponse(text)
-    const aiMessage = chatStore.addMessage(aiResponse, false)
-
-    // 播放语音回复
-    if (!chatStore.isSpeaking) {
-      await speakFloatingMessage(aiResponse)
-    }
-
-    await scrollToBottom()
-  }, 800 + Math.random() * 600) // 更短的随机延迟
-}
-
-// 生成AI回复（浮动风格）
-const generateAIFloatingResponse = (userMessage: string): string => {
-  const floatingResponses = [
-    '哇～主人对我说话了呢！\n让我想想怎么回答比较好... ✨',
-    '诶嘿嘿～主人的声音真好听！\n我会认真记住的～ 💕',
-    '哇，好有趣的话题！\n让我也分享一下我的想法吧～ 🌸',
-    '主人今天心情怎么样呀？\n看起来很开心呢～ ☁️',
-    '诶？是这样的吗？\n我第一次听说呢，好新鲜！ 🌙',
-    '主人的想法好特别呢～\n我觉得很有意思哦！ ⭐',
-    '哇，感觉和主人聊天好开心！\n能再多说一点吗？ 🌈',
-    '主人说得对呢～\n我也有同样的感觉！ 💫'
-  ]
-
-  return floatingResponses[Math.floor(Math.random() * floatingResponses.length)]
-}
-
-// 语音合成消息（带浮动效果）
-const speakFloatingMessage = async (text: string) => {
-  chatStore.setSpeaking(true)
-
-  try {
-    await new Promise((resolve) => {
-      speechService.speak(
-        text,
-        chatStore.voiceSettings.lang,
-        chatStore.voiceSettings.pitch,
-        chatStore.voiceSettings.rate,
-        chatStore.voiceSettings.volume,
-        () => {
-          // 开始播放时触发浮动效果
-          console.log('🎵 开始播放浮动语音:', text)
-        },
-        () => {
-          // 播放结束
-          chatStore.setSpeaking(false)
-          console.log('🎵 浮动语音播放结束')
-          resolve(void 0)
-        },
-        (error) => {
-          console.error('浮动语音播放错误:', error)
-          chatStore.setSpeaking(false)
-          resolve(void 0)
-        }
-      )
-    })
-  } catch (error) {
-    console.error('浮动语音合成失败:', error)
-    chatStore.setSpeaking(false)
-  }
 }
 
 // 语音识别结果处理
@@ -162,12 +102,57 @@ const toggleRecording = async () => {
   }
 }
 
+// 切换监听模式
+const toggleModeSelector = () => {
+  showModeSelector.value = !showModeSelector.value
+}
+
+// 选择监听模式
+const selectListenMode = (mode: 'auto' | 'manual' | 'realtime') => {
+  listenMode.value = mode
+  showModeSelector.value = false
+
+  // 如果正在录音，重启以应用新模式
+  if (isRecording.value) {
+    stopRecording()
+    setTimeout(() => startRecording(), 100)
+  }
+}
+
+// 获取模式描述
+const getModeDescription = (mode: 'auto' | 'manual' | 'realtime') => {
+  switch (mode) {
+    case 'auto':
+      return '自动停止 - 检测到停顿后自动停止'
+    case 'manual':
+      return '手动停止 - 需手动点击停止按钮'
+    case 'realtime':
+      return '持续监听 - 实时流式传输，无需停止'
+    default:
+      return '未知模式'
+  }
+}
+
+// 获取模式图标
+const getModeIcon = (mode: 'auto' | 'manual' | 'realtime') => {
+  switch (mode) {
+    case 'auto':
+      return '🤖'
+    case 'manual':
+      return '👆'
+    case 'realtime':
+      return '📡'
+    default:
+      return '❓'
+  }
+}
+
 // 开始语音识别
 const startRecording = async () => {
   // 使用Websocket模式
   if (useWebsocket.value && chatStore.isConnected) {
     try {
-      await chatStore.startVoiceListen('auto')
+      await chatStore.startVoiceListen(listenMode.value) // 使用选择的模式
       isRecording.value = true
     }
     catch (error) {
@@ -325,6 +310,38 @@ onMounted(() => {
 
       <!-- 简化输入区域 -->
       <div class="simple-input-area">
+        <!-- 监听模式选择器 -->
+        <div class="mode-selector-wrapper" v-if="useWebsocket && chatStore.isConnected">
+          <button
+            @click="toggleModeSelector"
+            class="mode-selector-button"
+            :title="`当前模式: ${getModeDescription(listenMode)}`"
+          >
+            <span class="mode-icon">{{ getModeIcon(listenMode) }}</span>
+            <span class="mode-label">{{ listenMode }}</span>
+          </button>
+
+          <!-- 模式下拉菜单 -->
+          <transition name="mode-dropdown">
+            <div v-if="showModeSelector" class="mode-dropdown">
+              <button
+                v-for="mode in ['auto', 'manual', 'realtime'] as const"
+                :key="mode"
+                @click="selectListenMode(mode)"
+                class="mode-option"
+                :class="{ active: listenMode === mode }"
+              >
+                <span class="option-icon">{{ getModeIcon(mode) }}</span>
+                <div class="option-content">
+                  <div class="option-title">{{ mode }}</div>
+                  <div class="option-desc">{{ getModeDescription(mode) }}</div>
+                </div>
+                <span v-if="listenMode === mode" class="check-mark">✓</span>
+              </button>
+            </div>
+          </transition>
+        </div>
+
         <!-- 简化文本输入 -->
         <div class="simple-input-wrapper">
           <input
@@ -565,6 +582,122 @@ onMounted(() => {
   backdrop-filter: blur(10px);
   flex-shrink: 0; /* 防止输入区域被压缩 */
   margin-bottom: 30px;
+}
+
+/* 监听模式选择器 */
+.mode-selector-wrapper {
+  position: relative;
+  margin-bottom: 8px;
+}
+
+.mode-selector-button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 20px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.9);
+  width: fit-content;
+}
+
+.mode-selector-button:hover {
+  background: rgba(255, 255, 255, 0.15);
+  transform: translateY(-1px);
+}
+
+.mode-icon {
+  font-size: 14px;
+}
+
+.mode-label {
+  font-weight: 500;
+  text-transform: capitalize;
+}
+
+.mode-dropdown {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  margin-bottom: 8px;
+  background: rgba(0, 0, 0, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(20px);
+  z-index: 1000;
+  min-width: 280px;
+}
+
+.mode-option {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  width: 100%;
+  text-align: left;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.mode-option:last-child {
+  border-bottom: none;
+}
+
+.mode-option:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.mode-option.active {
+  background: rgba(78, 205, 196, 0.2);
+}
+
+.option-icon {
+  font-size: 20px;
+  flex-shrink: 0;
+}
+
+.option-content {
+  flex: 1;
+}
+
+.option-title {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 4px;
+  text-transform: capitalize;
+}
+
+.option-desc {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.6);
+  line-height: 1.4;
+}
+
+.check-mark {
+  font-size: 16px;
+  color: rgba(78, 205, 196, 1);
+  flex-shrink: 0;
+}
+
+.mode-dropdown-enter-active,
+.mode-dropdown-leave-active {
+  transition: all 0.2s ease;
+}
+
+.mode-dropdown-enter-from,
+.mode-dropdown-leave-to {
+  opacity: 0;
+  transform: translateY(10px);
 }
 
 /* 简化输入包装器 */

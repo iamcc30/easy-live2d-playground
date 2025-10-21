@@ -61,7 +61,14 @@ const stopRecording = () => {
   recordingStatus.value = ''
   interimText.value = ''
 
-  speechService.stopRecognition()
+  // Check if using WebSocket mode
+  if (chatStore.isConnected && chatStore.isListening) {
+    // Use WebSocket mode - this will also send stop message to server
+    chatStore.stopVoiceListen()
+  } else {
+    // Use local speech recognition
+    speechService.stopRecognition()
+  }
 }
 
 // 切换录音状态

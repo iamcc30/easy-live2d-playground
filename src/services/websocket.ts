@@ -1,438 +1,490 @@
-import {io} from 'socket.io-client'
+import { ref } from 'vue'
 import type {
-    WebsocketMessage,
-    HelloMessage,
-    ListenMessage,
-    TTSMessage,
-    AbortMessage,
-    MCPMessage,
-    LLMMessage,
-    ConnectionState,
-    WebsocketEventHandlers,
-    ListenMode,
-    SessionInfo,
-    SocketInstance
+  WebsocketMessage,
+  HelloMessage,
+  ListenMessage,
+  TTSMessage,
+  AbortMessage,
+  MCPMessage,
+  LLMMessage,
+  ConnectionState,
+  WebsocketEventHandlers,
+  ListenMode,
+  SessionInfo,
 } from '@/types/websocket'
-import {websocketConfig, audioRecordingConfig, audioPlaybackConfig, getAccessToken} from '@/config/websocket'
-import {errorHandler} from '@/utils/errorHandler'
+import { websocketConfig, audioRecordingConfig, getAccessToken } from '@/config/websocket'
+import { errorHandler } from '@/utils/errorHandler'
 
 /**
- * Socket.IO Service for Voice Chat
- * Handles connection, authentication, and message exchange
+ * Native WebSocket Service for Voice Chat
+ * Handles connection, authentication, and message exchange using native WebSocket API
  */
 export class WebsocketService {
-    private socket: SocketInstance | null = null
-    private connectionState: ConnectionState = 'disconnected'
-    private reconnectAttempts = 0
-    private eventHandlers: WebsocketEventHandlers = {}
-    private sessionInfo: SessionInfo = {
-        sessionId: '',
-        startTime: new Date(),
-        messageCount: 0,
-        audioBytesSent: 0,
-        audioBytesReceived: 0
+  private ws: WebSocket | null = null
+  // Use Vue ref for reactive connection state
+  private connectionState = ref<ConnectionState>('disconnected')
+  private reconnectAttempts = 0
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  private eventHandlers: WebsocketEventHandlers = {}
+  private sessionInfo: SessionInfo = {
+    sessionId: '',
+    startTime: new Date(),
+    messageCount: 0,
+    audioBytesSent: 0,
+    audioBytesReceived: 0,
+  }
+
+  /**
+   * Connect to WebSocket server
+   */
+  async connect(handlers: WebsocketEventHandlers = {}): Promise<void> {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      console.warn('Already connected to WebSocket server')
+      return
     }
 
-    /**
-     * Connect to Socket.IO server
-     */
-    async connect(handlers: WebsocketEventHandlers = {}): Promise<void> {
-        if (this.socket && this.connectionState === 'connected') {
-            console.warn('Already connected to Socket.IO server')
-            return
+    this.eventHandlers = handlers
+    this.connectionState.value = 'connecting'
+
+    try {
+      const token = getAccessToken()
+
+      // if (!token || token === 'xxxx') {
+      //   throw new Error('Valid access token is required for authentication')
+      // }
+
+      // Convert HTTP URL to WebSocket URL
+      const wsUrl = websocketConfig.url.replace(/^http/, 'ws')
+
+      // Build WebSocket URL with query parameters for authentication
+      const url = new URL(wsUrl)
+      url.searchParams.set('token', token)
+      url.searchParams.set('deviceId', websocketConfig.deviceId)
+      url.searchParams.set('clientId', websocketConfig.clientId)
+      url.searchParams.set('protocolVersion', websocketConfig.protocolVersion.toString())
+
+      console.log('🔗 Connecting to WebSocket server:', wsUrl)
+      console.log('📝 Authentication info:', {
+        deviceId: websocketConfig.deviceId,
+        clientId: websocketConfig.clientId,
+        protocolVersion: websocketConfig.protocolVersion,
+        authTokenLength: token.length,
+      })
+
+      // Create WebSocket connection
+      this.ws = new WebSocket(url.toString())
+      this.ws.binaryType = 'arraybuffer'
+
+      // Setup event listeners
+      this.setupEventListeners()
+
+      // Wait for connection
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('Connection timeout'))
+        }, 10000)
+
+        const onOpen = () => {
+          clearTimeout(timeout)
+          this.ws?.removeEventListener('open', onOpen)
+          this.ws?.removeEventListener('error', onError)
+          resolve()
         }
 
-        this.eventHandlers = handlers
-        this.connectionState = 'connecting'
-
-        try {
-            const token = getAccessToken()
-
-            if (!token) {
-                throw new Error('Access token is required for authentication')
-            }
-
-            // Parse URL to get base server address and path
-            const url = new URL(websocketConfig.url)
-            const serverUrl = `${url.protocol}//${url.host}`
-            const urlPath = url.pathname && url.pathname !== '/' ? url.pathname : undefined
-
-            console.log('🔗 Connecting to Socket.IO server:', serverUrl)
-            console.log('📝 URL path:', urlPath || '(using Socket.IO default)')
-            console.log('📝 Authentication info:', {
-                deviceId: websocketConfig.deviceId,
-                clientId: websocketConfig.clientId,
-                protocolVersion: websocketConfig.protocolVersion,
-                authTokenLength: token.length
-            })
-
-            // Create Socket.IO connection with authentication
-            // Use 'auth' for handshake data that server needs to identify the client
-            const socketOptions: any = {
-                transports: ['websocket'],
-                extraHeaders: {
-                    'Authorization': 'Bearer ' + token,
-                    'Device-Id': websocketConfig.deviceId,
-                    'Client-Id': websocketConfig.clientId,
-                    'Protocol-Version': websocketConfig.protocolVersion
-                },
-                reconnection: websocketConfig.reconnect,
-                reconnectionDelay: websocketConfig.reconnectInterval,
-                reconnectionAttempts: websocketConfig.reconnectMaxAttempts,
-                autoConnect: false
-            }
-
-            // Determine final path
-            // Priority: explicit config.path > URL path > Socket.IO default
-            let finalPath: string | undefined
-
-            if (websocketConfig.path !== undefined) {
-                // config.path is explicitly set (could be '', '/', or custom path)
-                if (websocketConfig.path === '') {
-                    // Empty string means use Socket.IO default
-                    finalPath = undefined
-                    console.log('📍 Using Socket.IO default path (/socket.io)')
-                } else {
-                    // Use the configured path
-                    finalPath = websocketConfig.path
-                    console.log('📍 Using configured path:', finalPath)
-                }
-            } else if (urlPath) {
-                // Use path from URL
-                finalPath = urlPath
-                console.log('📍 Using URL path:', finalPath)
-            } else {
-                // No path specified, Socket.IO will use default
-                finalPath = undefined
-                console.log('📍 Using Socket.IO default path (/socket.io)')
-            }
-
-            // Set path option if we have a custom path
-            if (finalPath !== undefined) {
-                socketOptions.path = finalPath
-            }
-
-            console.log('🚀 Connecting to Socket.IO server...', socketOptions)
-            this.socket = io(serverUrl, socketOptions)
-
-            // Setup event listeners
-            this.setupEventListeners()
-
-            // Connect manually to have control over connection lifecycle
-            this.socket.connect()
-
-            // Wait for connection
-            await new Promise<void>((resolve, reject) => {
-                const timeout = setTimeout(() => {
-                    reject(new Error('Connection timeout'))
-                }, 10000)
-
-                this.socket!.once('connect', () => {
-                    clearTimeout(timeout)
-                    resolve()
-                })
-
-                this.socket!.once('connect_error', (error) => {
-                    clearTimeout(timeout)
-                    reject(error)
-                })
-            })
-
-            // Send hello message after connection
-            await this.sendHello()
-
-            this.connectionState = 'connected'
-            this.reconnectAttempts = 0
-            this.eventHandlers.onConnected?.()
-
-            console.log('✅ Socket.IO connected successfully')
-        } catch (error) {
-            this.connectionState = 'error'
-            this.handleError(error as Error)
-            throw error
-        }
-    }
-
-    /**
-     * Disconnect from Socket.IO server
-     */
-    disconnect(): void {
-        if (this.socket) {
-            this.socket.disconnect()
-            this.socket = null
+        const onError = () => {
+          clearTimeout(timeout)
+          this.ws?.removeEventListener('open', onOpen)
+          this.ws?.removeEventListener('error', onError)
+          reject(new Error('Connection failed'))
         }
 
-        this.connectionState = 'disconnected'
-        this.eventHandlers.onDisconnected?.()
-        console.log('🔌 Socket.IO disconnected')
+        this.ws?.addEventListener('open', onOpen)
+        this.ws?.addEventListener('error', onError)
+      })
+
+      // Send hello message after connection
+      await this.sendHello()
+
+      this.connectionState.value = 'connected'
+      this.reconnectAttempts = 0
+      this.eventHandlers.onConnected?.()
+
+      console.log('✅ WebSocket connected successfully')
+    }
+    catch (error) {
+      this.connectionState.value = 'error'
+      this.handleError(error as Error)
+      throw error
+    }
+  }
+
+  /**
+   * Disconnect from WebSocket server
+   */
+  disconnect(): void {
+    // Clear reconnect timer
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
     }
 
-    /**
-     * Setup Socket.IO event listeners
-     */
-    private setupEventListeners(): void {
-        if (!this.socket) return
-
-        // Connection events
-        this.socket.on('connect', this.handleConnect.bind(this))
-        this.socket.on('disconnect', this.handleDisconnect.bind(this))
-        this.socket.on('connect_error', this.handleConnectionError.bind(this))
-
-        // Custom message events
-        this.socket.on('hello', (message: HelloMessage) => this.handleHelloResponse(message))
-        this.socket.on('tts', (message: TTSMessage) => this.handleTTSMessage(message))
-        this.socket.on('llm', (message: LLMMessage) => this.handleLLMMessage(message))
-        this.socket.on('mcp', (message: MCPMessage) => this.handleMCPMessage(message))
-        this.socket.on('audio', (data: ArrayBuffer) => this.handleAudioData(data))
-
-        // Reconnection events
-        this.socket.on('reconnect_attempt', (attemptNumber: number) => {
-            this.reconnectAttempts = attemptNumber
-            this.connectionState = 'reconnecting'
-            console.log(`🔄 Reconnecting... (attempt ${attemptNumber}/${websocketConfig.reconnectMaxAttempts})`)
-        })
-
-        this.socket.on('reconnect', () => {
-            this.reconnectAttempts = 0
-            this.connectionState = 'connected'
-            console.log('✅ Reconnected successfully')
-            this.eventHandlers.onConnected?.()
-        })
-
-        this.socket.on('reconnect_failed', () => {
-            console.error('❌ Reconnection failed')
-            this.connectionState = 'error'
-            this.handleError(new Error('Reconnection failed'))
-        })
+    if (this.ws) {
+      this.ws.close(1000, 'Client disconnected')
+      this.ws = null
     }
 
-    /**
-     * Handle Socket.IO connect event
-     */
-    private handleConnect(): void {
-        console.log('🔗 Socket.IO connection established')
+    this.connectionState.value = 'disconnected'
+    this.eventHandlers.onDisconnected?.()
+    console.log('🔌 WebSocket disconnected')
+  }
+
+  /**
+   * Setup WebSocket event listeners
+   */
+  private setupEventListeners(): void {
+    if (!this.ws)
+      return
+
+    this.ws.onopen = this.handleOpen.bind(this)
+    this.ws.onmessage = this.handleMessage.bind(this)
+    this.ws.onerror = this.handleErrorEvent.bind(this)
+    this.ws.onclose = this.handleClose.bind(this)
+  }
+
+  /**
+   * Handle WebSocket open event
+   */
+  private handleOpen(): void {
+    console.log('🔗 WebSocket connection established')
+  }
+
+  /**
+   * Handle WebSocket message event
+   */
+  private handleMessage(event: MessageEvent): void {
+    if (event.data instanceof ArrayBuffer) {
+      // Binary audio data
+      this.handleAudioData(event.data)
+    }
+    else if (typeof event.data === 'string') {
+      // JSON message
+      try {
+        const message = JSON.parse(event.data)
+        this.handleJsonMessage(message)
+      }
+      catch (e) {
+        console.error('Failed to parse message:', e)
+      }
+    }
+  }
+
+  /**
+   * Handle JSON messages from server
+   */
+  private handleJsonMessage(message: any): void {
+    this.sessionInfo.messageCount++
+
+    console.log('📨 Received JSON message:', JSON.stringify(message, null, 2))
+
+    switch (message.type) {
+      case 'hello':
+        this.handleHelloResponse(message as HelloMessage)
+        break
+      case 'tts':
+        this.handleTTSMessage(message as TTSMessage)
+        break
+      case 'llm':
+        this.handleLLMMessage(message as LLMMessage)
+        break
+      case 'mcp':
+        this.handleMCPMessage(message as MCPMessage)
+        break
+      case 'listen':
+        // Handle listen response if needed
+        console.log('🎤 Listen response:', message)
+        break
+      default:
+        console.warn('Unknown message type:', message.type)
+    }
+  }
+
+  /**
+   * Handle hello response from server
+   */
+  private handleHelloResponse(message: HelloMessage): void {
+    console.log('👋 Server hello response:', message)
+
+    // Handle session_id according to protocol
+    // Protocol: "Websocket 协议不返回 session_id，会话 ID 可设为空"
+    if (message.session_id) {
+      // Server returned session_id (not standard, but supported)
+      this.sessionInfo.sessionId = message.session_id
+      console.log('📝 Server-assigned session ID:', message.session_id)
+    } else {
+      // Protocol standard: server doesn't return session_id
+      // Use client-generated session_id (already set in sendHello)
+      console.log('ℹ️ Using client-generated session ID:', this.sessionInfo.sessionId)
     }
 
-    /**
-     * Handle Socket.IO disconnect event
-     */
-    private handleDisconnect(reason: string): void {
-        console.log('🔌 Socket.IO disconnected:', reason)
-        this.connectionState = 'disconnected'
-        this.eventHandlers.onDisconnected?.()
+    this.eventHandlers.onHello?.(message)
+  }
+
+  /**
+   * Handle TTS message from server
+   */
+  private handleTTSMessage(message: TTSMessage): void {
+    console.log('🔊 TTS message:', message.state, message.text)
+    this.eventHandlers.onTTS?.(message)
+  }
+
+  /**
+   * Handle LLM emotion message from server
+   */
+  private handleLLMMessage(message: LLMMessage): void {
+    console.log('😊 LLM emotion:', message.emotion)
+    this.eventHandlers.onLLM?.(message)
+  }
+
+  /**
+   * Handle MCP message from server
+   */
+  private handleMCPMessage(message: MCPMessage): void {
+    console.log('📦 MCP message:', message.payload)
+    this.eventHandlers.onMCP?.(message)
+  }
+
+  /**
+   * Handle binary audio data from server
+   */
+  private handleAudioData(data: ArrayBuffer): void {
+    this.sessionInfo.audioBytesReceived += data.byteLength
+    console.log(`🎵 Received audio data: ${data.byteLength} bytes`)
+    this.eventHandlers.onAudioData?.(data)
+  }
+
+  /**
+   * Handle WebSocket error event
+   */
+  private handleErrorEvent(event: Event): void {
+    console.error('❌ WebSocket error:', event)
+    this.connectionState.value = 'error'
+    this.handleError(new Error('WebSocket error'))
+  }
+
+  /**
+   * Handle WebSocket close event
+   */
+  private handleClose(event: CloseEvent): void {
+    console.log('🔌 WebSocket closed:', event.code, event.reason)
+    this.connectionState.value = 'disconnected'
+    this.eventHandlers.onDisconnected?.()
+
+    // Auto reconnect if not manually closed
+    if (event.code !== 1000 && websocketConfig.reconnect) {
+      this.scheduleReconnect()
+    }
+  }
+
+  /**
+   * Schedule reconnection attempt
+   */
+  private scheduleReconnect(): void {
+    if (this.reconnectAttempts >= websocketConfig.reconnectMaxAttempts) {
+      console.error('❌ Max reconnection attempts reached')
+      this.connectionState.value = 'error'
+      this.handleError(new Error('Max reconnection attempts reached'))
+      return
     }
 
-    /**
-     * Handle Socket.IO connection error
-     */
-    private handleConnectionError(error: Error): void {
-        console.error('❌ Socket.IO connection error:', error)
-        this.connectionState = 'error'
-        this.handleError(error)
+    this.reconnectAttempts++
+    this.connectionState.value = 'reconnecting'
+
+    const delay = websocketConfig.reconnectInterval * this.reconnectAttempts
+    console.log(`🔄 Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${websocketConfig.reconnectMaxAttempts})`)
+
+    this.reconnectTimer = setTimeout(() => {
+      this.connect(this.eventHandlers).catch((error) => {
+        console.error('Reconnection failed:', error)
+        this.scheduleReconnect()
+      })
+    }, delay)
+  }
+
+  /**
+   * Send hello message to server
+   */
+  private async sendHello(): Promise<void> {
+    // Generate client-side session_id immediately
+    // Format: {deviceId}-{timestamp}-{random}
+    const timestamp = Date.now()
+    const random = Math.random().toString(36).substring(2, 11)
+    this.sessionInfo.sessionId = `${websocketConfig.deviceId}-${timestamp}-${random}`
+
+    console.log('🆔 Generated client-side session_id:', this.sessionInfo.sessionId)
+
+    const helloMessage: HelloMessage = {
+      type: 'hello',
+      version: websocketConfig.protocolVersion,
+      transport: 'websocket',
+      features: {
+        mcp: true,
+      },
+      audio_params: {
+        format: audioRecordingConfig.format,
+        sample_rate: audioRecordingConfig.sampleRate,
+        channels: audioRecordingConfig.channels,
+        frame_duration: audioRecordingConfig.frameDuration,
+      },
     }
 
-    /**
-     * Handle hello response from server
-     */
-    private handleHelloResponse(message: HelloMessage): void {
-        console.log('👋 Server hello response:', message)
-        this.eventHandlers.onHello?.(message)
+    this.send(helloMessage)
+    console.log('📤 Sent hello message with client session_id')
+  }
+
+  /**
+   * Start listening (voice recognition)
+   */
+  startListen(mode: ListenMode = 'auto'): void {
+    console.log('🎤 startListen called with mode:', mode)
+    console.log('📝 Current sessionId:', this.sessionInfo.sessionId)
+    console.log('📋 Full sessionInfo:', JSON.stringify(this.sessionInfo, null, 2))
+
+    const message: ListenMessage = {
+      session_id: this.sessionInfo.sessionId,
+      type: 'listen',
+      state: 'start',
+      mode,
     }
 
-    /**
-     * Handle TTS message from server
-     */
-    private handleTTSMessage(message: TTSMessage): void {
-        console.log('🔊 TTS message:', message.state, message.text)
-        this.sessionInfo.messageCount++
-        this.eventHandlers.onTTS?.(message)
+    console.log('📤 Sending listen message:', JSON.stringify(message, null, 2))
+    this.send(message)
+    console.log(`🎤 Started listening in ${mode} mode`)
+  }
+
+  /**
+   * Stop listening
+   */
+  stopListen(): void {
+    const message: ListenMessage = {
+      session_id: this.sessionInfo.sessionId,
+      type: 'listen',
+      state: 'stop',
     }
 
-    /**
-     * Handle LLM emotion message from server
-     */
-    private handleLLMMessage(message: LLMMessage): void {
-        console.log('😊 LLM emotion:', message.emotion)
-        this.sessionInfo.messageCount++
-        this.eventHandlers.onLLM?.(message)
+    this.send(message)
+    console.log('🛑 Stopped listening')
+  }
+
+  /**
+   * Send wake word detection
+   */
+  detectWakeWord(wakeWord: string): void {
+    const message: ListenMessage = {
+      session_id: this.sessionInfo.sessionId,
+      type: 'listen',
+      state: 'detect',
+      text: wakeWord,
     }
 
-    /**
-     * Handle MCP message from server
-     */
-    private handleMCPMessage(message: MCPMessage): void {
-        console.log('📦 MCP message:', message.payload)
-        this.sessionInfo.messageCount++
-        this.eventHandlers.onMCP?.(message)
+    this.send(message)
+    console.log('👂 Wake word detected:', wakeWord)
+  }
+
+  /**
+   * Abort current session
+   */
+  abort(reason?: string): void {
+    const message: AbortMessage = {
+      session_id: this.sessionInfo.sessionId,
+      type: 'abort',
+      reason,
     }
 
-    /**
-     * Handle binary audio data from server
-     */
-    private handleAudioData(data: ArrayBuffer): void {
-        this.sessionInfo.audioBytesReceived += data.byteLength
-        console.log(`🎵 Received audio data: ${data.byteLength} bytes`)
-        this.eventHandlers.onAudioData?.(data)
+    this.send(message)
+    console.log('❌ Session aborted:', reason)
+  }
+
+  /**
+   * Send MCP message
+   */
+  sendMCP(payload: unknown): void {
+    const message: MCPMessage = {
+      session_id: this.sessionInfo.sessionId,
+      type: 'mcp',
+      payload,
     }
 
-    /**
-     * Send hello message to server
-     */
-    private async sendHello(): Promise<void> {
-        const helloMessage: HelloMessage = {
-            type: 'hello',
-            version: websocketConfig.protocolVersion,
-            transport: 'socketio',
-            features: {
-                mcp: true
-            },
-            audio_params: {
-                format: audioRecordingConfig.format,
-                sample_rate: audioRecordingConfig.sampleRate,
-                channels: audioRecordingConfig.channels,
-                frame_duration: audioRecordingConfig.frameDuration
-            }
-        }
+    this.send(message)
+  }
 
-        this.emit('hello', helloMessage)
+  /**
+   * Send JSON message
+   */
+  private send(message: WebsocketMessage): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      console.error('Cannot send message: not connected')
+      return
     }
 
-    /**
-     * Start listening (voice recognition)
-     */
-    startListen(mode: ListenMode = 'auto'): void {
-        const message: ListenMessage = {
-            session_id: this.sessionInfo.sessionId,
-            type: 'listen',
-            state: 'start',
-            mode
-        }
+    try {
+      this.ws.send(JSON.stringify(message))
+      this.sessionInfo.messageCount++
+    }
+    catch (error) {
+      console.error('Failed to send message:', error)
+      this.handleError(error as Error)
+    }
+  }
 
-        this.emit('listen', message)
-        console.log(`🎤 Started listening in ${mode} mode`)
+  /**
+   * Send binary audio data
+   */
+  sendAudioData(data: ArrayBuffer): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      console.error('❌ Cannot send audio: not connected, readyState:', this.ws?.readyState)
+      return
     }
 
-    /**
-     * Stop listening
-     */
-    stopListen(): void {
-        const message: ListenMessage = {
-            session_id: this.sessionInfo.sessionId,
-            type: 'listen',
-            state: 'stop'
-        }
-
-        this.emit('listen', message)
-        console.log('🛑 Stopped listening')
+    try {
+      this.ws.send(data)
+      this.sessionInfo.audioBytesSent += data.byteLength
+      console.log(`📤 Sent audio data: ${data.byteLength} bytes (total: ${this.sessionInfo.audioBytesSent} bytes)`)
     }
-
-    /**
-     * Send wake word detection
-     */
-    detectWakeWord(wakeWord: string): void {
-        const message: ListenMessage = {
-            session_id: this.sessionInfo.sessionId,
-            type: 'listen',
-            state: 'detect',
-            text: wakeWord
-        }
-
-        this.emit('listen', message)
-        console.log('👂 Wake word detected:', wakeWord)
+    catch (error) {
+      console.error('❌ Failed to send audio data:', error)
+      this.handleError(error as Error)
     }
+  }
 
-    /**
-     * Abort current session
-     */
-    abort(reason?: string): void {
-        const message: AbortMessage = {
-            session_id: this.sessionInfo.sessionId,
-            type: 'abort',
-            reason
-        }
+  /**
+   * Handle errors
+   */
+  private handleError(error: Error): void {
+    console.error('WebSocket service error:', error)
+    errorHandler.showErrorMessage('WebSocket连接错误', error.message)
+    this.eventHandlers.onError?.(error)
+  }
 
-        this.emit('abort', message)
-        console.log('❌ Session aborted:', reason)
-    }
+  /**
+   * Get connection state
+   */
+  getConnectionState(): ConnectionState {
+    return this.connectionState.value
+  }
 
-    /**
-     * Send MCP message
-     */
-    sendMCP(payload: unknown): void {
-        const message: MCPMessage = {
-            session_id: this.sessionInfo.sessionId,
-            type: 'mcp',
-            payload
-        }
+  /**
+   * Check if connected
+   */
+  isConnected(): boolean {
+    return this.connectionState.value === 'connected' && this.ws?.readyState === WebSocket.OPEN
+  }
 
-        this.emit('mcp', message)
-    }
-
-    /**
-     * Emit event through Socket.IO
-     */
-    private emit(event: string, data: WebsocketMessage | ArrayBuffer): void {
-        if (!this.socket || this.connectionState !== 'connected') {
-            console.error('Cannot emit event: not connected')
-            return
-        }
-
-        try {
-            this.socket.emit(event, data)
-            this.sessionInfo.messageCount++
-        } catch (error) {
-            console.error('Failed to emit event:', error)
-            this.handleError(error as Error)
-        }
-    }
-
-    /**
-     * Send binary audio data
-     */
-    sendAudioData(data: ArrayBuffer): void {
-        if (!this.socket || this.connectionState !== 'connected') {
-            console.error('Cannot send audio: not connected')
-            return
-        }
-
-        try {
-            this.socket.emit('audio', data)
-            this.sessionInfo.audioBytesSent += data.byteLength
-        } catch (error) {
-            console.error('Failed to send audio data:', error)
-            this.handleError(error as Error)
-        }
-    }
-
-    /**
-     * Handle errors
-     */
-    private handleError(error: Error): void {
-        console.error('Socket.IO service error:', error)
-        errorHandler.showErrorMessage('Socket.IO连接错误', error.message)
-        this.eventHandlers.onError?.(error)
-    }
-
-    /**
-     * Get connection state
-     */
-    getConnectionState(): ConnectionState {
-        return this.connectionState
-    }
-
-    /**
-     * Check if connected
-     */
-    isConnected(): boolean {
-        return this.connectionState === 'connected' && this.socket?.connected === true
-    }
-
-    /**
-     * Get session info
-     */
-    getSessionInfo(): SessionInfo {
-        return {...this.sessionInfo}
-    }
+  /**
+   * Get session info
+   */
+  getSessionInfo(): SessionInfo {
+    return { ...this.sessionInfo }
+  }
 }
 
 // Create singleton instance

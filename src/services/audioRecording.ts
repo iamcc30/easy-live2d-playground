@@ -6,20 +6,22 @@ import { OpusEncoder } from './opusEncoder'
  * Audio Recording Service with OPUS encoding support
  *
  * Features:
- * - WebCodecs API OPUS encoding (Chrome 94+, Edge 94+)
+ * - WebCodecs API for raw OPUS frames (no container) - RECOMMENDED
+ * - MediaRecorder API for Opus in OGG container (fallback)
  * - PCM fallback for unsupported browsers
  * - Automatic format detection and switching
  */
 export class AudioRecordingService {
   private mediaStream: MediaStream | null = null
+  private mediaRecorder: MediaRecorder | null = null
   private audioContext: AudioContext | null = null
   private mediaStreamSource: MediaStreamAudioSourceNode | null = null
   private scriptProcessor: ScriptProcessorNode | null = null
   private isRecording = false
   private onDataCallback: ((data: ArrayBuffer) => void) | null = null
+  private useMediaRecorder = false
   private opusEncoder: OpusEncoder | null = null
-  private useOpusEncoding = false
-  private audioTimestamp = 0
+  private useWebCodecs = false
 
   /**
    * Initialize audio recording
@@ -37,16 +39,30 @@ export class AudioRecordingService {
         }
       })
 
-      // Create audio context
+      // Priority 1: Try WebCodecs OPUS encoder (raw OPUS frames, no container)
+      this.opusEncoder = new OpusEncoder()
+      if (this.opusEncoder.isOpusSupported()) {
+        console.log('✅ WebCodecs OPUS encoder available - will use raw OPUS frames')
+        this.useWebCodecs = true
+      }
+
+      // Priority 2: Fallback to MediaRecorder if WebCodecs not available
+      if (!this.useWebCodecs) {
+        this.useMediaRecorder = this.checkOpusSupport()
+      }
+
+      // Priority 3: Setup PCM recording if neither WebCodecs nor MediaRecorder available
+      if (!this.useWebCodecs && !this.useMediaRecorder) {
+        console.log('⚠️ WebCodecs and MediaRecorder OPUS not available, using PCM fallback')
+      }
+
+      // Always setup AudioContext for PCM capture (needed for WebCodecs encoding)
       this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({
         sampleRate: audioRecordingConfig.sampleRate
       })
 
-      // Create media stream source
       this.mediaStreamSource = this.audioContext.createMediaStreamSource(this.mediaStream)
 
-      // Create script processor for audio data
-      // Buffer size calculation: sampleRate * frameDuration / 1000
       const bufferSize = Math.pow(2, Math.ceil(Math.log2(
         audioRecordingConfig.sampleRate * audioRecordingConfig.frameDuration / 1000
       )))
@@ -57,22 +73,22 @@ export class AudioRecordingService {
         audioRecordingConfig.channels
       )
 
-      // Setup audio processing
       this.scriptProcessor.onaudioprocess = (event) => {
         if (this.isRecording) {
           this.processAudioData(event.inputBuffer)
         }
       }
 
-      // Connect nodes
       this.mediaStreamSource.connect(this.scriptProcessor)
       this.scriptProcessor.connect(this.audioContext.destination)
 
-      // Try to initialize OPUS encoder
-      this.opusEncoder = new OpusEncoder()
-      this.useOpusEncoding = false // Will be set when starting recording
+      const mode = this.useWebCodecs
+        ? 'WebCodecs (Raw OPUS frames)'
+        : this.useMediaRecorder
+          ? 'MediaRecorder (OPUS/OGG container)'
+          : 'AudioContext (PCM)'
 
-      console.log('✅ Audio recording initialized')
+      console.log('✅ Audio recording initialized:', mode)
     }
     catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error'
@@ -82,45 +98,127 @@ export class AudioRecordingService {
   }
 
   /**
+   * Check if MediaRecorder supports Opus in OGG container
+   */
+  private checkOpusSupport(): boolean {
+    if (typeof MediaRecorder === 'undefined') {
+      console.warn('⚠️ MediaRecorder API not supported')
+      return false
+    }
+
+    // Check for audio/ogg;codecs=opus support
+    const mimeTypes = [
+      'audio/ogg;codecs=opus',
+      'audio/webm;codecs=opus',
+      'audio/opus'
+    ]
+
+    for (const mimeType of mimeTypes) {
+      if (MediaRecorder.isTypeSupported(mimeType)) {
+        console.log('✅ Supported MIME type:', mimeType)
+        return true
+      }
+    }
+
+    console.warn('⚠️ No Opus MIME types supported, falling back to PCM')
+    return false
+  }
+
+  /**
    * Start recording
    */
   async startRecording(onData: (data: ArrayBuffer) => void): Promise<void> {
-    if (!this.audioContext || !this.scriptProcessor) {
-      throw new Error('Audio recording not initialized')
-    }
-
     if (this.isRecording) {
       console.warn('Already recording')
       return
     }
 
     this.onDataCallback = onData
-    this.audioTimestamp = 0
+    this.isRecording = true
 
-    // Try to initialize OPUS encoding
-    if (this.opusEncoder) {
-      this.useOpusEncoding = await this.opusEncoder.initialize((opusData) => {
+    // Priority 1: Use WebCodecs OPUS encoder (raw OPUS frames)
+    if (this.useWebCodecs && this.opusEncoder) {
+      const encoderReady = await this.opusEncoder.initialize((data: Uint8Array) => {
+        console.log(`🎵 Raw OPUS frame: ${data.byteLength} bytes`)
         if (this.onDataCallback) {
-          this.onDataCallback(opusData.buffer)
+          // Convert Uint8Array to ArrayBuffer
+          this.onDataCallback(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength))
         }
       })
 
-      if (this.useOpusEncoding) {
-        console.log('🎵 Using OPUS encoding')
+      if (!encoderReady) {
+        console.warn('⚠️ WebCodecs encoder failed to initialize, falling back')
+        this.useWebCodecs = false
       }
       else {
-        console.log('📊 Using PCM fallback')
+        console.log('🎤 Recording started with WebCodecs OPUS encoder (Raw OPUS frames)')
+
+        // Start AudioContext if suspended
+        if (this.audioContext && this.audioContext.state === 'suspended') {
+          await this.audioContext.resume()
+        }
+        return
       }
     }
 
-    this.isRecording = true
+    // Priority 2: Use MediaRecorder for Opus in OGG container (fallback)
+    if (this.useMediaRecorder && this.mediaStream) {
+      const mimeType = this.getSupportedMimeType()
+      console.log('🎵 Using MediaRecorder with MIME type:', mimeType)
 
-    // Resume audio context if suspended
-    if (this.audioContext.state === 'suspended') {
-      await this.audioContext.resume()
+      this.mediaRecorder = new MediaRecorder(this.mediaStream, {
+        mimeType,
+        audioBitsPerSecond: 16000 // 16 kbps for voice
+      })
+
+      // Collect audio data chunks
+      this.mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          // Convert Blob to ArrayBuffer
+          event.data.arrayBuffer().then((buffer) => {
+            console.log(`🎵 Opus/OGG chunk: ${buffer.byteLength} bytes`)
+            console.warn('⚠️ Sending OPUS in container format - server may have decode issues!')
+            if (this.onDataCallback) {
+              this.onDataCallback(buffer)
+            }
+          })
+        }
+      }
+
+      this.mediaRecorder.onerror = (event) => {
+        console.error('❌ MediaRecorder error:', event)
+      }
+
+      // Start recording with small time slices (60ms)
+      this.mediaRecorder.start(audioRecordingConfig.frameDuration)
+      console.log('🎤 Recording started with MediaRecorder (Opus/OGG container)')
+    }
+    // Priority 3: Use AudioContext for PCM (final fallback)
+    else {
+      if (this.audioContext && this.audioContext.state === 'suspended') {
+        await this.audioContext.resume()
+      }
+      console.log('🎤 Recording started with AudioContext (PCM)')
+    }
+  }
+
+  /**
+   * Get supported MIME type for MediaRecorder
+   */
+  private getSupportedMimeType(): string {
+    const mimeTypes = [
+      'audio/ogg;codecs=opus',
+      'audio/webm;codecs=opus',
+      'audio/opus'
+    ]
+
+    for (const mimeType of mimeTypes) {
+      if (MediaRecorder.isTypeSupported(mimeType)) {
+        return mimeType
+      }
     }
 
-    console.log('🎤 Recording started')
+    throw new Error('No supported MIME type found')
   }
 
   /**
@@ -133,40 +231,42 @@ export class AudioRecordingService {
 
     this.isRecording = false
 
-    // Flush OPUS encoder
-    if (this.useOpusEncoding && this.opusEncoder) {
-      await this.opusEncoder.flush()
+    if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
+      this.mediaRecorder.stop()
+      this.mediaRecorder = null
     }
 
     this.onDataCallback = null
-    this.audioTimestamp = 0
-
     console.log('🛑 Recording stopped')
   }
 
   /**
-   * Process audio data and encode to OPUS or PCM
+   * Process audio data (used for both WebCodecs encoding and PCM fallback)
    */
   private processAudioData(buffer: AudioBuffer): void {
-    if (!this.onDataCallback) return
+    if (!this.onDataCallback) {
+      return
+    }
 
     try {
-      // Get audio data from first channel
       const channelData = buffer.getChannelData(0)
 
-      // Use OPUS encoding if available
-      if (this.useOpusEncoding && this.opusEncoder) {
-        this.opusEncoder.encode(channelData, this.audioTimestamp)
-        this.audioTimestamp += buffer.duration
+      // Priority 1: Use WebCodecs OPUS encoder
+      if (this.useWebCodecs && this.opusEncoder) {
+        // Encode PCM data to OPUS
+        const timestamp = performance.now()
+        this.opusEncoder.encode(channelData, timestamp)
+        // Encoded data will be sent via the callback set in startRecording
+        return
       }
-      else {
-        // Fallback to PCM
-        const pcmData = this.float32ToInt16(channelData)
-        this.onDataCallback(pcmData.buffer)
-      }
+
+      // Priority 2: Send raw PCM data (fallback)
+      const pcmData = this.float32ToInt16(channelData)
+      console.log(`📊 Sending PCM data: ${pcmData.byteLength} bytes`)
+      this.onDataCallback(pcmData.buffer)
     }
     catch (error) {
-      console.error('Failed to process audio data:', error)
+      console.error('❌ Failed to process audio data:', error)
     }
   }
 
@@ -188,10 +288,13 @@ export class AudioRecordingService {
   dispose(): void {
     this.stopRecording()
 
-    // Close OPUS encoder
     if (this.opusEncoder) {
       this.opusEncoder.close()
       this.opusEncoder = null
+    }
+
+    if (this.mediaRecorder) {
+      this.mediaRecorder = null
     }
 
     if (this.scriptProcessor) {
@@ -225,10 +328,10 @@ export class AudioRecordingService {
   }
 
   /**
-   * Check if using OPUS encoding
+   * Check if using Opus encoding
    */
   isUsingOpus(): boolean {
-    return this.useOpusEncoding
+    return this.useWebCodecs || this.useMediaRecorder
   }
 
   /**
@@ -242,10 +345,16 @@ export class AudioRecordingService {
    * Get encoder status
    */
   getEncoderStatus(): { supported: boolean, state: string, format: string } {
+    const format = this.useWebCodecs
+      ? 'webcodecs-opus (raw frames)'
+      : this.useMediaRecorder
+        ? 'mediarecorder-opus (container)'
+        : 'pcm'
+
     return {
-      supported: this.opusEncoder?.isOpusSupported() || false,
-      state: this.opusEncoder?.getState() || 'uninitialized',
-      format: this.useOpusEncoding ? 'opus' : 'pcm'
+      supported: this.useWebCodecs || this.useMediaRecorder,
+      state: this.isRecording ? 'recording' : 'inactive',
+      format
     }
   }
 }

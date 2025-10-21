@@ -51,7 +51,7 @@ export class OpusEncoder {
         codec: 'opus',
         sampleRate: audioRecordingConfig.sampleRate,
         numberOfChannels: audioRecordingConfig.channels,
-        bitrate: 24000, // 24 kbps for voice
+        bitrate: 16000, // 24 kbps for voice
         opus: {
           frameDuration: audioRecordingConfig.frameDuration * 1000, // Convert to microseconds
           complexity: 5, // 0-10, higher = better quality but slower
@@ -121,13 +121,18 @@ export class OpusEncoder {
       const buffer = new Uint8Array(chunk.byteLength)
       chunk.copyTo(buffer)
 
+      console.log(`🎼 OPUS encoded chunk: ${buffer.byteLength} bytes, timestamp: ${chunk.timestamp}`)
+
       // Send to callback
       if (this.onDataCallback) {
         this.onDataCallback(buffer)
       }
+      else {
+        console.warn('⚠️ No callback set for encoded data')
+      }
     }
     catch (error) {
-      console.error('Failed to handle encoded chunk:', error)
+      console.error('❌ Failed to handle encoded chunk:', error)
     }
   }
 
