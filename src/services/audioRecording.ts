@@ -1,6 +1,7 @@
 import { audioRecordingConfig } from '@/config/websocket'
 import { errorHandler } from '@/utils/errorHandler'
 import { OpusEncoder } from './opusEncoder'
+import { getBrowserCapabilities, getUnsupportedFeatureMessage, logBrowserCapabilities } from '@/utils/browserCapabilities'
 
 /**
  * Audio Recording Service with OPUS encoding support
@@ -26,6 +27,17 @@ export class AudioRecordingService {
    */
   async initialize(): Promise<void> {
     try {
+      // Log browser capabilities for debugging
+      logBrowserCapabilities()
+
+      // Check browser capabilities
+      const capabilities = getBrowserCapabilities()
+      const errorMessage = getUnsupportedFeatureMessage(capabilities)
+
+      if (errorMessage) {
+        throw new Error(errorMessage)
+      }
+
       // Request microphone access
       this.mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -222,6 +234,13 @@ export class AudioRecordingService {
    */
   getIsRecording(): boolean {
     return this.isRecording
+  }
+
+  /**
+   * Check if properly initialized
+   */
+  isInitialized(): boolean {
+    return this.mediaStream !== null && this.audioContext !== null
   }
 
   /**

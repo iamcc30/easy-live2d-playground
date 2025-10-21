@@ -19,6 +19,12 @@ import {errorHandler} from '@/utils/errorHandler'
 /**
  * Socket.IO Service for Voice Chat
  * Handles connection, authentication, and message exchange
+ *
+ * Enhanced with:
+ * - Health check and heartbeat monitoring
+ * - Connection quality tracking
+ * - Comprehensive error recovery
+ * - Event lifecycle management
  */
 export class WebsocketService {
     private socket: SocketInstance | null = null
@@ -32,6 +38,12 @@ export class WebsocketService {
         audioBytesSent: 0,
         audioBytesReceived: 0
     }
+
+    // Health check and monitoring
+    private heartbeatInterval: number | null = null
+    private lastPongTime: number = Date.now()
+    private connectionQuality: 'excellent' | 'good' | 'poor' | 'unknown' = 'unknown'
+    private latency: number = 0
 
     /**
      * Connect to Socket.IO server
@@ -66,11 +78,16 @@ export class WebsocketService {
                 authTokenLength: token.length
             })
 
+            url.searchParams.set('Authorization', 'Bearer ' + token)
+            url.searchParams.set('device_id', websocketConfig.deviceId)
+            url.searchParams.set('client_id', websocketConfig.clientId)
+            url.searchParams.set('protocol_version', websocketConfig.protocolVersion.toString())
+
             // Create Socket.IO connection with authentication
             // Use 'auth' for handshake data that server needs to identify the client
             const socketOptions: any = {
                 transports: ['websocket'],
-                extraHeaders: {
+                auth: {
                     'Authorization': 'Bearer ' + token,
                     'Device-Id': websocketConfig.deviceId,
                     'Client-Id': websocketConfig.clientId,
@@ -145,6 +162,9 @@ export class WebsocketService {
             this.reconnectAttempts = 0
             this.eventHandlers.onConnected?.()
 
+            // Start heartbeat monitoring
+            this.startHeartbeat()
+
             console.log('✅ Socket.IO connected successfully')
         } catch (error) {
             this.connectionState = 'error'
@@ -157,12 +177,16 @@ export class WebsocketService {
      * Disconnect from Socket.IO server
      */
     disconnect(): void {
+        // Stop heartbeat monitoring
+        this.stopHeartbeat()
+
         if (this.socket) {
             this.socket.disconnect()
             this.socket = null
         }
 
         this.connectionState = 'disconnected'
+        this.connectionQuality = 'unknown'
         this.eventHandlers.onDisconnected?.()
         console.log('🔌 Socket.IO disconnected')
     }
@@ -185,6 +209,9 @@ export class WebsocketService {
         this.socket.on('mcp', (message: MCPMessage) => this.handleMCPMessage(message))
         this.socket.on('audio', (data: ArrayBuffer) => this.handleAudioData(data))
 
+        // Health check events
+        this.socket.on('pong', () => this.handlePong())
+
         // Reconnection events
         this.socket.on('reconnect_attempt', (attemptNumber: number) => {
             this.reconnectAttempts = attemptNumber
@@ -197,6 +224,7 @@ export class WebsocketService {
             this.connectionState = 'connected'
             console.log('✅ Reconnected successfully')
             this.eventHandlers.onConnected?.()
+            this.startHeartbeat() // Restart heartbeat after reconnection
         })
 
         this.socket.on('reconnect_failed', () => {
@@ -432,6 +460,83 @@ export class WebsocketService {
      */
     getSessionInfo(): SessionInfo {
         return {...this.sessionInfo}
+    }
+
+    /**
+     * Start heartbeat monitoring
+     */
+    private startHeartbeat(): void {
+        // Stop existing heartbeat
+        this.stopHeartbeat()
+
+        // Send ping every 30 seconds
+        this.heartbeatInterval = setInterval(() => {
+            if (this.socket && this.connectionState === 'connected') {
+                const pingTime = Date.now()
+                this.socket.emit('ping', { timestamp: pingTime })
+
+                // Check if pong was received recently (within 10 seconds)
+                const timeSinceLastPong = Date.now() - this.lastPongTime
+                if (timeSinceLastPong > 10000) {
+                    console.warn('⚠️ Heartbeat timeout, connection may be unstable')
+                    this.connectionQuality = 'poor'
+                } else if (this.latency > 500) {
+                    this.connectionQuality = 'poor'
+                } else if (this.latency > 200) {
+                    this.connectionQuality = 'good'
+                } else {
+                    this.connectionQuality = 'excellent'
+                }
+            }
+        }, 30000)
+
+        console.log('💓 Heartbeat monitoring started')
+    }
+
+    /**
+     * Stop heartbeat monitoring
+     */
+    private stopHeartbeat(): void {
+        if (this.heartbeatInterval) {
+            clearInterval(this.heartbeatInterval)
+            this.heartbeatInterval = null
+            console.log('💔 Heartbeat monitoring stopped')
+        }
+    }
+
+    /**
+     * Handle pong response
+     */
+    private handlePong(): void {
+        const now = Date.now()
+        this.latency = now - this.lastPongTime
+        this.lastPongTime = now
+        console.log(`💓 Pong received (latency: ${this.latency}ms)`)
+    }
+
+    /**
+     * Get connection quality
+     */
+    getConnectionQuality(): 'excellent' | 'good' | 'poor' | 'unknown' {
+        return this.connectionQuality
+    }
+
+    /**
+     * Get current latency
+     */
+    getLatency(): number {
+        return this.latency
+    }
+
+    /**
+     * Force reconnect
+     */
+    reconnect(): void {
+        console.log('🔄 Force reconnecting...')
+        if (this.socket) {
+            this.socket.disconnect()
+            this.socket.connect()
+        }
     }
 }
 

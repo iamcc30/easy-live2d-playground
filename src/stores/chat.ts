@@ -155,9 +155,22 @@ export const useChatStore = defineStore('chat', () => {
    */
   async function connectWebsocket(): Promise<void> {
     try {
-      // Initialize services
-      await audioRecordingService.initialize()
-      await audioPlaybackService.initialize()
+      // Initialize services - make audio optional
+      let audioInitialized = false
+      try {
+        await audioRecordingService.initialize()
+        await audioPlaybackService.initialize()
+        audioInitialized = true
+        console.log('✅ Audio services initialized')
+      }
+      catch (audioError) {
+        console.warn('⚠️ Audio services unavailable:', audioError)
+        errorHandler.showWarning(
+          '音频功能不可用',
+          audioError instanceof Error ? audioError.message : 'Unknown error'
+        )
+        // Continue with WebSocket connection even if audio fails
+      }
 
       // Setup event handlers and connect
       await websocketService.connect({
@@ -169,7 +182,12 @@ export const useChatStore = defineStore('chat', () => {
         onError: handleWebsocketError
       })
 
-      errorHandler.showSuccess('连接成功', 'Websocket连接已建立')
+      if (audioInitialized) {
+        errorHandler.showSuccess('连接成功', 'Websocket连接已建立，音频功能可用')
+      }
+      else {
+        errorHandler.showSuccess('连接成功', 'Websocket连接已建立（仅文本模式）')
+      }
     }
     catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error'
@@ -193,6 +211,15 @@ export const useChatStore = defineStore('chat', () => {
   async function startVoiceListen(mode: ListenMode = 'auto'): Promise<void> {
     if (!isConnected.value) {
       errorHandler.showErrorMessage('未连接', '请先连接到服务器')
+      return
+    }
+
+    // Check if audio recording is initialized
+    if (!audioRecordingService.isInitialized()) {
+      errorHandler.showErrorMessage(
+        '音频功能不可用',
+        '音频录制未初始化。请确保使用HTTPS或localhost，并使用支持getUserMedia的现代浏览器。'
+      )
       return
     }
 
