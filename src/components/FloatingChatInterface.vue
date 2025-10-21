@@ -1,9 +1,14 @@
 <script setup lang="ts">
-import { ref, onMounted, nextTick, computed } from 'vue'
+import { ref, onMounted, nextTick, computed, watch } from 'vue'
 import { useChatStore } from '@/stores/chat'
 import { speechService } from '@/utils/speech'
+import { voiceHaptics } from '@/utils/hapticFeedback'
 import FloatingChatMessage from './FloatingChatMessage.vue'
 import FloatingParticles from './FloatingParticles.vue'
+import VoiceWaveform from './VoiceWaveform.vue'
+import VoiceControlCenter from './VoiceControlCenter.vue'
+import StatusIndicator from './StatusIndicator.vue'
+import type { ListenMode } from '@/types/websocket'
 
 const chatStore = useChatStore()
 const messageInput = ref('')
@@ -13,20 +18,31 @@ const isInputFocused = ref(false)
 const showParticles = ref(true)
 const isFloating = ref(true)
 const isMobile = ref(false)
-const useWebsocket = ref(true) // Toggle between Websocket and local speech
+const useWebsocket = ref(true)
 
 // 监听模式
-const listenMode = ref<'auto' | 'manual' | 'realtime'>('auto')
-const showModeSelector = ref(false)
+const listenMode = ref<ListenMode>('auto')
 
 // 语音识别相关
 const isRecognitionAvailable = computed(() => speechService.isRecognitionSupported())
+
+// 语音状态
+const voiceState = computed<'idle' | 'listening' | 'processing' | 'speaking' | 'error'>(() => {
+  if (isRecording.value) return 'listening'
+  if (chatStore.isSpeaking) return 'speaking'
+  if (chatStore.connectionState === 'error') return 'error'
+  return 'idle'
+})
+
+// 音频波形级别（模拟）
+const audioLevel = ref(0)
+let audioLevelAnimation: number | null = null
 
 // 计算属性
 const userAvatar = computed(() => '🌸')
 const aiAvatar = computed(() => '✨')
 
-// Websocket连接状态标识
+// 连接状态图标
 const getConnectionStatusIcon = computed(() => {
   switch (chatStore.connectionState) {
     case 'connected': return '🟢'
@@ -49,15 +65,33 @@ const getConnectionStatusText = computed(() => {
 
 // 切换连接
 const toggleConnection = async () => {
+  voiceHaptics.buttonTap()
+
   if (chatStore.isConnected) {
     chatStore.disconnectWebsocket()
   }
   else {
     try {
       await chatStore.connectWebsocket()
+      voiceHaptics.connectionSuccess()
     }
     catch (error) {
       console.error('连接失败:', error)
+      voiceHaptics.connectionError()
+    }
+  }
+}
+
+// 更新音频波形级别
+const updateAudioLevel = () => {
+  if (isRecording.value || chatStore.isSpeaking) {
+    audioLevel.value = 0.3 + Math.random() * 0.7
+    audioLevelAnimation = requestAnimationFrame(updateAudioLevel)
+  } else {
+    audioLevel.value = 0
+    if (audioLevelAnimation) {
+      cancelAnimationFrame(audioLevelAnimation)
+      audioLevelAnimation = null
     }
   }
 }
@@ -75,24 +109,16 @@ const sendMessage = async () => {
   const text = messageInput.value.trim()
   if (!text) return
 
-  // 添加用户消息，带有浮动动画效果
-  const userMessage = chatStore.addMessage(text, true)
+  voiceHaptics.buttonTap()
 
-  // 清空输入框
+  chatStore.addMessage(text, true)
   messageInput.value = ''
   chatStore.clearInput()
 
-  // 滚动到底部
   await scrollToBottom()
 }
 
-// 语音识别结果处理
-const handleVoiceInput = (text: string) => {
-  messageInput.value = text
-  sendMessage()
-}
-
-// 语音录制切换
+// 切换录音状态
 const toggleRecording = async () => {
   if (isRecording.value) {
     stopRecording()
@@ -102,15 +128,15 @@ const toggleRecording = async () => {
   }
 }
 
-// 切换监听模式
-const toggleModeSelector = () => {
-  showModeSelector.value = !showModeSelector.value
+// 停止语音播放
+const stopSpeaking = () => {
+  speechService.stopSpeaking()
+  chatStore.setSpeaking(false)
 }
 
-// 选择监听模式
-const selectListenMode = (mode: 'auto' | 'manual' | 'realtime') => {
+// 切换监听模式
+const changeListenMode = (mode: ListenMode) => {
   listenMode.value = mode
-  showModeSelector.value = false
 
   // 如果正在录音，重启以应用新模式
   if (isRecording.value) {
@@ -119,41 +145,14 @@ const selectListenMode = (mode: 'auto' | 'manual' | 'realtime') => {
   }
 }
 
-// 获取模式描述
-const getModeDescription = (mode: 'auto' | 'manual' | 'realtime') => {
-  switch (mode) {
-    case 'auto':
-      return '自动停止 - 检测到停顿后自动停止'
-    case 'manual':
-      return '手动停止 - 需手动点击停止按钮'
-    case 'realtime':
-      return '持续监听 - 实时流式传输，无需停止'
-    default:
-      return '未知模式'
-  }
-}
-
-// 获取模式图标
-const getModeIcon = (mode: 'auto' | 'manual' | 'realtime') => {
-  switch (mode) {
-    case 'auto':
-      return '🤖'
-    case 'manual':
-      return '👆'
-    case 'realtime':
-      return '📡'
-    default:
-      return '❓'
-  }
-}
-
 // 开始语音识别
 const startRecording = async () => {
   // 使用Websocket模式
   if (useWebsocket.value && chatStore.isConnected) {
     try {
-      await chatStore.startVoiceListen(listenMode.value) // 使用选择的模式
+      await chatStore.startVoiceListen(listenMode.value)
       isRecording.value = true
+      updateAudioLevel()
     }
     catch (error) {
       console.error('Websocket语音启动失败:', error)
@@ -167,11 +166,11 @@ const startRecording = async () => {
   }
 
   isRecording.value = true
+  updateAudioLevel()
 
   speechService.startRecognition(
     (result) => {
       if (result.isFinal) {
-        // 识别完成，发送消息
         messageInput.value = result.transcript
         sendMessage()
         stopRecording()
@@ -182,7 +181,6 @@ const startRecording = async () => {
       stopRecording()
     },
     () => {
-      // 识别结束
       stopRecording()
     },
     'zh-CN'
@@ -203,27 +201,10 @@ const stopRecording = () => {
   speechService.stopRecognition()
 }
 
-// 输入框聚焦效果
-const handleInputFocus = () => {
-  isInputFocused.value = true
-  // 聚焦时增加浮动效果
-  isFloating.value = true
-
-  // 移动端键盘弹出时滚动到输入框
-  if (isMobile.value && messagesContainer.value) {
-    setTimeout(() => {
-      messagesContainer.value?.scrollIntoView({ behavior: 'smooth', block: 'end' })
-    }, 300)
-  }
-}
-
-const handleInputBlur = () => {
-  isInputFocused.value = false
-  // 失焦时恢复
-  setTimeout(() => {
-    isFloating.value = true
-  }, 300)
-}
+// 监听录音和播放状态，更新音频波形
+watch([() => isRecording.value, () => chatStore.isSpeaking], () => {
+  updateAudioLevel()
+})
 
 // 监听消息变化
 chatStore.$subscribe(() => {
@@ -242,11 +223,11 @@ onMounted(() => {
   chatStore.loadHistory()
   scrollToBottom()
 
-  // 添加欢迎消息（浮动风格）
+  // 添加欢迎消息
   if (chatStore.messages.length === 0) {
     setTimeout(() => {
       chatStore.addMessage(
-        '哇～主人来啦！\n我是您的浮动小助手，\n让我们一起在云端聊天吧！\n\n试试对我说话吧～ ☁️✨',
+        '哇～主人来啦！\n我是您的AI语音助手，\n试试对我说话吧！\n\n💬 点击大按钮开始语音对话 ☁️✨',
         false
       )
     }, 1000)
@@ -271,15 +252,10 @@ onMounted(() => {
     />
 
     <!-- 浮动聊天主体 -->
-    <div class="floating-chat-main"
-         :class="{ 'lifted': isInputFocused }"
-    >
-      <!-- 极简头部 -->
-      <div class="simple-header"
-           :class="{ active: chatStore.isSpeaking }"
-      >
-        <span class="simple-title">💬</span>
-        <!-- 连接状态指示器 -->
+    <div class="floating-chat-main">
+      <!-- 顶部连接状态 -->
+      <div class="top-header">
+        <span class="app-icon">💬</span>
         <button
           @click="toggleConnection"
           class="connection-button"
@@ -291,12 +267,25 @@ onMounted(() => {
         </button>
       </div>
 
-      <!-- 消息区域（玻璃拟态）-->
-      <div ref="messagesContainer" class="floating-messages"
+      <!-- 智能状态指示器 -->
+      <StatusIndicator
+        :state="voiceState"
+        :is-connected="chatStore.isConnected"
+      />
+
+      <!-- 实时音频波形 -->
+      <VoiceWaveform
+        :is-active="isRecording || chatStore.isSpeaking"
+        :is-recording="isRecording"
+        :is-speaking="chatStore.isSpeaking"
+        :audio-level="audioLevel"
+      />
+
+      <!-- 消息显示区（压缩）-->
+      <div ref="messagesContainer" class="compact-messages"
            :class="{ 'speaking': chatStore.isSpeaking }"
       >
-        <transition-group name="floating-message" tag="div" class="messages-list"
-        >
+        <transition-group name="floating-message" tag="div" class="messages-list">
           <FloatingChatMessage
             v-for="message in chatStore.messages"
             :key="message.id"
@@ -308,77 +297,37 @@ onMounted(() => {
         </transition-group>
       </div>
 
-      <!-- 简化输入区域 -->
-      <div class="simple-input-area">
-        <!-- 监听模式选择器 -->
-        <div class="mode-selector-wrapper" v-if="useWebsocket && chatStore.isConnected">
-          <button
-            @click="toggleModeSelector"
-            class="mode-selector-button"
-            :title="`当前模式: ${getModeDescription(listenMode)}`"
-          >
-            <span class="mode-icon">{{ getModeIcon(listenMode) }}</span>
-            <span class="mode-label">{{ listenMode }}</span>
-          </button>
+      <!-- 语音控制中心（主要交互区域）-->
+      <VoiceControlCenter
+        :is-recording="isRecording"
+        :is-speaking="chatStore.isSpeaking"
+        :is-connected="chatStore.isConnected"
+        :current-mode="listenMode"
+        :disabled="!isRecognitionAvailable"
+        @toggle-recording="toggleRecording"
+        @stop-speaking="stopSpeaking"
+        @change-mode="changeListenMode"
+      />
 
-          <!-- 模式下拉菜单 -->
-          <transition name="mode-dropdown">
-            <div v-if="showModeSelector" class="mode-dropdown">
-              <button
-                v-for="mode in ['auto', 'manual', 'realtime'] as const"
-                :key="mode"
-                @click="selectListenMode(mode)"
-                class="mode-option"
-                :class="{ active: listenMode === mode }"
-              >
-                <span class="option-icon">{{ getModeIcon(mode) }}</span>
-                <div class="option-content">
-                  <div class="option-title">{{ mode }}</div>
-                  <div class="option-desc">{{ getModeDescription(mode) }}</div>
-                </div>
-                <span v-if="listenMode === mode" class="check-mark">✓</span>
-              </button>
-            </div>
-          </transition>
-        </div>
-
-        <!-- 简化文本输入 -->
-        <div class="simple-input-wrapper">
-          <input
-            v-model="messageInput"
-            type="text"
-            placeholder="说点什么..."
-            class="simple-message-input"
-            @keyup.enter="sendMessage"
-            @focus="handleInputFocus"
-            @blur="handleInputBlur"
-            :disabled="isRecording"
-            autocomplete="off"
-            autocapitalize="off"
-            autocorrect="off"
-            spellcheck="false"
-            :inputmode="isMobile ? 'text' : undefined"
-          />
-          <button
-            @click="sendMessage"
-            :disabled="!messageInput.trim() || isRecording"
-            class="simple-send-button"
-          >
-            发送
-          </button>
-          <!-- 语音按钮移到发送按钮后面 -->
-          <button
-            @click="toggleRecording"
-            :class="{ recording: isRecording, speaking: chatStore.isSpeaking }"
-            :disabled="!isRecognitionAvailable"
-            class="simple-voice-button"
-            title="语音输入"
-          >
-            <span v-if="!isRecording" class="voice-icon">🎤</span>
-            <span v-else-if="chatStore.isSpeaking" class="voice-icon">🔊</span>
-            <span v-else class="voice-icon">🔴</span>
-          </button>
-        </div>
+      <!-- 文本输入（作为备用）-->
+      <div class="backup-text-input">
+        <input
+          v-model="messageInput"
+          type="text"
+          placeholder="或者输入文字..."
+          class="text-input"
+          @keyup.enter="sendMessage"
+          @focus="isInputFocused = true"
+          @blur="isInputFocused = false"
+          :disabled="isRecording"
+        />
+        <button
+          @click="sendMessage"
+          :disabled="!messageInput.trim() || isRecording"
+          class="send-button"
+        >
+          发送
+        </button>
       </div>
     </div>
   </div>
@@ -396,7 +345,7 @@ onMounted(() => {
 }
 
 .floating-chat-container.input-focused {
-  transform: scale(1.02);
+  transform: scale(1.01);
 }
 
 .floating-chat-container.floating-active {
@@ -405,16 +354,10 @@ onMounted(() => {
 
 @keyframes gentleFloat {
   0%, 100% {
-    transform: translateY(0px) rotate(0deg);
-  }
-  25% {
-    transform: translateY(-2px) rotate(0.2deg);
+    transform: translateY(0px);
   }
   50% {
-    transform: translateY(-4px) rotate(0deg);
-  }
-  75% {
-    transform: translateY(-2px) rotate(-0.2deg);
+    transform: translateY(-3px);
   }
 }
 
@@ -424,422 +367,26 @@ onMounted(() => {
   height: 100%;
   display: flex;
   flex-direction: column;
-  padding: 16px;
+  padding: 12px;
+  gap: 10px;
   transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-  transform-style: preserve-3d;
   overflow: hidden;
 }
 
-.floating-chat-main.lifted {
-  transform: translateY(-8px) rotateX(2deg);
-  filter: drop-shadow(0 20px 40px rgba(255, 182, 193, 0.3));
-}
-
-/* 浮动头部（极简） */
-.floating-header {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 12px;
-  margin-bottom: 12px;
-  transition: all 0.3s ease;
-}
-
-.floating-header.active {
-  animation: headerGlow 2s infinite;
-}
-
-@keyframes headerGlow {
-  0%, 100% {
-    filter: drop-shadow(0 0 10px rgba(255, 182, 193, 0.3));
-  }
-  50% {
-    filter: drop-shadow(0 0 20px rgba(255, 182, 193, 0.6));
-  }
-}
-
-.floating-gem {
-  width: 32px;
-  height: 32px;
-  background: linear-gradient(135deg,
-    rgba(255, 255, 255, 0.8) 0%,
-    rgba(255, 182, 193, 0.6) 100%
-  );
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  backdrop-filter: blur(10px);
-  border: 1px solid rgba(255, 255, 255, 0.3);
-  transition: all 0.3s ease;
-}
-
-.floating-gem.pulse {
-  animation: gemPulse 1.5s infinite;
-}
-
-@keyframes gemPulse {
-  0%, 100% {
-    transform: scale(1);
-    box-shadow: 0 0 10px rgba(255, 182, 193, 0.3);
-  }
-  50% {
-    transform: scale(1.1);
-    box-shadow: 0 0 20px rgba(255, 182, 193, 0.6);
-  }
-}
-
-.gem-inner {
-  font-size: 16px;
-  filter: drop-shadow(0 0 3px rgba(255, 255, 255, 0.8));
-}
-
-.floating-line {
-  width: 60px;
-  height: 1px;
-  background: linear-gradient(90deg,
-    transparent,
-    rgba(255, 255, 255, 0.6),
-    transparent
-  );
-  margin: 0 16px;
-  transition: all 0.3s ease;
-}
-
-.floating-line.active {
-  background: linear-gradient(90deg,
-    transparent,
-    rgba(255, 182, 193, 0.8),
-    transparent
-  );
-  animation: lineGlow 2s infinite;
-}
-
-@keyframes lineGlow {
-  0%, 100% {
-    opacity: 0.5;
-  }
-  50% {
-    opacity: 1;
-  }
-}
-
-/* 浮动消息区域（玻璃拟态） */
-.floating-messages {
-  flex: 1;
-  min-height: 0; /* 修复flex布局问题 */
-  max-height: calc(100% - 160px); /* 确保不会超出容器，为输入区域留出空间 */
-  overflow-y: auto;
-  padding: 16px;
-  margin-bottom: 16px;
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 20px;
-  backdrop-filter: blur(20px);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  box-shadow:
-    0 8px 32px rgba(31, 38, 135, 0.1),
-    inset 0 0 10px rgba(255, 255, 255, 0.1);
-  transition: all 0.3s ease;
-  position: relative;
-}
-
-.floating-messages.speaking {
-  background: rgba(255, 182, 193, 0.15);
-  box-shadow:
-    0 8px 32px rgba(255, 182, 193, 0.2),
-    inset 0 0 15px rgba(255, 182, 193, 0.1);
-}
-
-.floating-messages:before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: linear-gradient(135deg,
-    rgba(255, 255, 255, 0.1) 0%,
-    rgba(255, 182, 193, 0.05) 100%
-  );
-  border-radius: 20px;
-  pointer-events: none;
-}
-
-.messages-list {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  position: relative;
-  z-index: 1;
-}
-
-/* 简化输入区域 */
-.simple-input-area {
-  padding: 12px;
-  background: rgba(255, 255, 255, 0.05);
-  border-radius: 16px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  backdrop-filter: blur(10px);
-  flex-shrink: 0; /* 防止输入区域被压缩 */
-  margin-bottom: 30px;
-}
-
-/* 监听模式选择器 */
-.mode-selector-wrapper {
-  position: relative;
-  margin-bottom: 8px;
-}
-
-.mode-selector-button {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 20px;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.9);
-  width: fit-content;
-}
-
-.mode-selector-button:hover {
-  background: rgba(255, 255, 255, 0.15);
-  transform: translateY(-1px);
-}
-
-.mode-icon {
-  font-size: 14px;
-}
-
-.mode-label {
-  font-weight: 500;
-  text-transform: capitalize;
-}
-
-.mode-dropdown {
-  position: absolute;
-  bottom: 100%;
-  left: 0;
-  margin-bottom: 8px;
-  background: rgba(0, 0, 0, 0.9);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 12px;
-  overflow: hidden;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
-  backdrop-filter: blur(20px);
-  z-index: 1000;
-  min-width: 280px;
-}
-
-.mode-option {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 12px 16px;
-  background: transparent;
-  border: none;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-  cursor: pointer;
-  transition: all 0.2s ease;
-  width: 100%;
-  text-align: left;
-  color: rgba(255, 255, 255, 0.9);
-}
-
-.mode-option:last-child {
-  border-bottom: none;
-}
-
-.mode-option:hover {
-  background: rgba(255, 255, 255, 0.1);
-}
-
-.mode-option.active {
-  background: rgba(78, 205, 196, 0.2);
-}
-
-.option-icon {
-  font-size: 20px;
-  flex-shrink: 0;
-}
-
-.option-content {
-  flex: 1;
-}
-
-.option-title {
-  font-size: 14px;
-  font-weight: 600;
-  margin-bottom: 4px;
-  text-transform: capitalize;
-}
-
-.option-desc {
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.6);
-  line-height: 1.4;
-}
-
-.check-mark {
-  font-size: 16px;
-  color: rgba(78, 205, 196, 1);
-  flex-shrink: 0;
-}
-
-.mode-dropdown-enter-active,
-.mode-dropdown-leave-active {
-  transition: all 0.2s ease;
-}
-
-.mode-dropdown-enter-from,
-.mode-dropdown-leave-to {
-  opacity: 0;
-  transform: translateY(10px);
-}
-
-/* 简化输入包装器 */
-.simple-input-wrapper {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-/* 简化消息输入框 */
-.simple-message-input {
-  flex: 1;
-  padding: 10px 14px;
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: 20px;
-  font-size: 14px;
-  color: #fff;
-  outline: none;
-  transition: all 0.2s ease;
-}
-
-.simple-message-input:focus {
-  background: rgba(255, 255, 255, 0.15);
-  border-color: rgba(255, 182, 193, 0.3);
-}
-
-.simple-message-input:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.simple-message-input::placeholder {
-  color: rgba(255, 255, 255, 0.6);
-}
-
-/* 简化发送按钮 */
-.simple-send-button {
-  padding: 10px 16px;
-  background: rgba(255, 255, 255, 0.15);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 20px;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  color: rgba(255, 255, 255, 0.9);
-  font-size: 14px;
-  font-weight: 500;
-}
-
-.simple-send-button:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.2);
-  transform: translateY(-1px);
-}
-
-.simple-send-button:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-/* 简化语音按钮 */
-.simple-voice-button {
-  width: 40px;
-  height: 40px;
-  border: none;
-  border-radius: 50%;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  color: rgba(255, 255, 255, 0.9);
-  font-size: 16px;
-}
-
-.simple-voice-button:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.15);
-  transform: translateY(-1px);
-}
-
-.simple-voice-button.recording {
-  background: rgba(255, 107, 107, 0.2);
-  animation: recordingPulse 1s infinite;
-}
-
-.simple-voice-button.speaking {
-  background: rgba(78, 205, 196, 0.2);
-}
-
-.simple-voice-button:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-.voice-icon {
-  transition: all 0.2s ease;
-}
-
-.simple-voice-button.recording .voice-icon {
-  animation: recordingBlink 1s infinite;
-}
-
-@keyframes recordingPulse {
-  0%, 100% {
-    transform: scale(1);
-  }
-  50% {
-    transform: scale(1.05);
-  }
-}
-
-@keyframes recordingBlink {
-  0%, 50% {
-    opacity: 1;
-  }
-  51%, 100% {
-    opacity: 0.3;
-  }
-}
-
-/* 简化头部 */
-.simple-header {
+/* 顶部连接状态 */
+.top-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 8px;
-  margin-bottom: 8px;
-  transition: all 0.3s ease;
+  flex-shrink: 0;
 }
 
-.simple-header.active {
-  animation: headerGlow 2s infinite;
-}
-
-.simple-title {
-  font-size: 16px;
+.app-icon {
+  font-size: 18px;
   filter: drop-shadow(0 0 5px rgba(255, 182, 193, 0.6));
 }
 
-/* 连接状态按钮 */
 .connection-button {
   display: flex;
   align-items: center;
@@ -856,7 +403,6 @@ onMounted(() => {
 
 .connection-button:hover {
   background: rgba(255, 255, 255, 0.15);
-  transform: translateY(-1px);
 }
 
 .connection-button.connected {
@@ -877,12 +423,8 @@ onMounted(() => {
 }
 
 @keyframes connectionPulse {
-  0%, 100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.7;
-  }
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
 }
 
 .status-dot {
@@ -895,263 +437,179 @@ onMounted(() => {
   white-space: nowrap;
 }
 
-@keyframes headerGlow {
-  0%, 100% {
-    opacity: 0.7;
-  }
-  50% {
-    opacity: 1;
-  }
+/* 紧凑消息区 */
+.compact-messages {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 16px;
+  backdrop-filter: blur(15px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  transition: all 0.3s ease;
+  margin: 0;
 }
 
-/* 简化语音控制 */
-.simple-control-buttons {
+.compact-messages.speaking {
+  background: rgba(78, 205, 196, 0.08);
+  border-color: rgba(78, 205, 196, 0.2);
+}
+
+.messages-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* 备用文本输入 */
+.backup-text-input {
   display: flex;
   gap: 8px;
-  justify-content: center;
-  margin-bottom: 10px;
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  flex-shrink: 0;
 }
 
-.simple-record-button,
-.simple-stop-button {
-  width: 40px;
-  height: 40px;
-  border: none;
-  border-radius: 50%;
-  cursor: pointer;
+.text-input {
+  flex: 1;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  font-size: 13px;
+  color: #fff;
+  outline: none;
   transition: all 0.2s ease;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  color: rgba(255, 255, 255, 0.9);
-  font-size: 16px;
 }
 
-.simple-record-button:hover:not(:disabled),
-.simple-stop-button:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.15);
-  transform: translateY(-1px);
+.text-input:focus {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 182, 193, 0.3);
 }
 
-.simple-record-button.recording {
-  background: rgba(255, 107, 107, 0.2);
-  animation: recordingPulse 1s infinite;
-}
-
-.simple-record-button.speaking {
-  background: rgba(78, 205, 196, 0.2);
-}
-
-.simple-record-button:disabled,
-.simple-stop-button:disabled {
-  opacity: 0.4;
+.text-input:disabled {
+  opacity: 0.5;
   cursor: not-allowed;
 }
 
-.record-icon,
-.speak-icon,
-.recording-icon {
+.text-input::placeholder {
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.send-button {
+  padding: 8px 16px;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 10px;
+  cursor: pointer;
   transition: all 0.2s ease;
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
 }
 
-.recording-icon {
-  animation: recordingBlink 1s infinite;
+.send-button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.18);
 }
 
-@keyframes recordingPulse {
-  0%, 100% {
-    transform: scale(1);
-  }
-  50% {
-    transform: scale(1.05);
-  }
-}
-
-@keyframes recordingBlink {
-  0%, 50% {
-    opacity: 1;
-  }
-  51%, 100% {
-    opacity: 0.3;
-  }
+.send-button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 /* 浮动消息动画 */
 .floating-message-enter-active,
 .floating-message-leave-active {
-  transition: all 0.6s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+  transition: all 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
 }
 
 .floating-message-enter-from {
   opacity: 0;
-  transform: translateY(30px) scale(0.8) rotate(-5deg);
+  transform: translateY(20px) scale(0.9);
 }
 
 .floating-message-leave-to {
   opacity: 0;
-  transform: translateX(100px) scale(0.8) rotate(5deg);
+  transform: translateX(50px) scale(0.9);
 }
 
-.floating-message-move {
-  transition: transform 0.6s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+/* 滚动条样式 */
+.compact-messages::-webkit-scrollbar {
+  width: 5px;
 }
 
-/* 滚动条样式（玻璃） */
-.floating-messages::-webkit-scrollbar {
-  width: 6px;
-}
-
-.floating-messages::-webkit-scrollbar-track {
-  background: rgba(255, 255, 255, 0.1);
+.compact-messages::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.05);
   border-radius: 3px;
 }
 
-.floating-messages::-webkit-scrollbar-thumb {
+.compact-messages::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 3px;
+}
+
+.compact-messages::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.3);
-  border-radius: 3px;
-}
-
-.floating-messages::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.4);
 }
 
 /* 响应式设计 */
 @media (max-width: 768px) {
   .floating-chat-main {
-    padding: 12px;
-  }
-
-  .floating-messages {
-    padding: 12px;
-    margin-bottom: 12px;
-    min-height: 120px; /* 减少最小高度 */
-    max-height: calc(100% - 100px); /* 调整移动设备上的最大高度 */
-  }
-
-  .simple-input-area {
     padding: 10px;
-    margin-top: auto; /* 确保输入区域在底部 */
-    flex-shrink: 0;
+    gap: 8px;
   }
 
-  .simple-input-wrapper {
+  .compact-messages {
+    padding: 10px;
+  }
+
+  .backup-text-input {
+    padding: 8px;
     gap: 6px;
-    flex-wrap: nowrap; /* 防止在小屏幕上换行 */
   }
 
-  .simple-message-input {
-    padding: 8px 12px;
-    font-size: 14px;
-    min-width: 0; /* 允许输入框收缩 */
+  .text-input {
+    padding: 6px 10px;
+    font-size: 12px;
   }
 
-  .simple-send-button {
-    padding: 8px 12px;
-    font-size: 13px;
-    white-space: nowrap; /* 防止文字换行 */
-  }
-
-  .simple-voice-button {
-    width: 36px;
-    height: 36px;
-    font-size: 14px;
-    flex-shrink: 0; /* 防止按钮收缩 */
-  }
-
-  .simple-header {
-    padding: 6px;
-    margin-bottom: 6px;
-  }
-
-  .simple-title {
-    font-size: 14px;
+  .send-button {
+    padding: 6px 12px;
+    font-size: 12px;
   }
 }
 
 @media (max-width: 480px) {
   .floating-chat-main {
     padding: 8px;
+    gap: 6px;
   }
 
-  .floating-messages {
+  .compact-messages {
     padding: 8px;
-    margin-bottom: 8px;
-    min-height: 100px; /* 更小屏幕的最小高度 */
-    max-height: calc(100% - 90px); /* 调整更小屏幕的最大高度 */
   }
 
-  .simple-input-area {
-    padding: 8px;
-    flex-shrink: 0;
+  .top-header {
+    padding: 6px;
   }
 
-  .simple-input-wrapper {
-    gap: 4px;
-  }
-
-  .simple-message-input {
-    padding: 6px 10px;
-    font-size: 13px;
-  }
-
-  .simple-send-button {
-    padding: 6px 10px;
-    font-size: 12px;
-  }
-
-  .simple-voice-button {
-    width: 32px;
-    height: 32px;
-    font-size: 12px;
-  }
-
-  .simple-header {
-    padding: 4px;
-    margin-bottom: 4px;
-  }
-
-  .simple-title {
-    font-size: 12px;
+  .app-icon {
+    font-size: 16px;
   }
 }
 
 @media (min-width: 1920px) {
   .floating-chat-main {
-    padding: 20px;
+    padding: 16px;
+    gap: 12px;
   }
 
-  .floating-messages {
-    padding: 20px;
-    margin-bottom: 20px;
-  }
-
-  .floating-input-area {
-    padding: 20px;
-  }
-
-  .floating-message-input {
-    padding: 16px 20px;
-    font-size: 15px;
-  }
-
-  .floating-send-button {
-    width: 52px;
-    height: 52px;
-  }
-
-  .button-icon {
-    font-size: 22px;
-  }
-
-  .floating-gem {
-    width: 36px;
-    height: 36px;
-  }
-
-  .gem-inner {
-    font-size: 18px;
+  .compact-messages {
+    padding: 16px;
   }
 }
 </style>

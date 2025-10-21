@@ -148,15 +148,50 @@ onMounted(async () => {
   window.addEventListener('resize', handleResize)
 })
 
-// 监听语音播放状态，控制嘴型同步
+// 监听语音播放状态，控制嘴型同步和角色动画
 watch(() => chatStore.isSpeaking, (isSpeaking) => {
   if (isSpeaking) {
-    // 开始嘴型同步
+    // 开始语音播放 - AI正在说话
     lipSyncService.startLipSync()
+
+    // 设置说话表情
+    live2DSprite.setExpression({ expressionId: 'happy' })
+
+    // 播放说话动作
+    live2DSprite.startMotion({
+      group: 'Idle',
+      no: 0,
+      priority: 2,
+    })
   }
   else {
-    // 停止嘴型同步
+    // 停止语音播放
     lipSyncService.stopLipSync()
+
+    // 恢复正常表情
+    setTimeout(() => {
+      live2DSprite.setExpression({ expressionId: 'normal' })
+    }, 500)
+  }
+})
+
+// 监听录音状态，让角色表现倾听姿态
+watch(() => chatStore.isListening, (isListening) => {
+  if (isListening) {
+    // 用户正在说话 - 角色倾听
+    live2DSprite.setExpression({ expressionId: 'normal' })
+
+    // 播放倾听动作（微微侧头）
+    live2DSprite.startMotion({
+      group: 'Idle',
+      no: 1,
+      priority: 1,
+    })
+
+    console.log('🎧 Live2D: 进入倾听状态')
+  } else {
+    // 停止倾听
+    console.log('👂 Live2D: 退出倾听状态')
   }
 })
 
