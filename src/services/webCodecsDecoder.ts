@@ -183,7 +183,7 @@ export class WebCodecsAudioDecoder {
   /**
    * Convert various audio formats to Float32Array
    */
-  private convertToFloat32(buffer: ArrayBuffer, format: string): Float32Array {
+  private convertToFloat32(buffer: ArrayBuffer, format: string | null): Float32Array {
     switch (format) {
       case 'f32':
       case 'f32-planar':

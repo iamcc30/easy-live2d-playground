@@ -21,10 +21,11 @@ const addNotification = (error: ErrorMessage) => {
   notifications.value.push(notification)
 
   // 自动移除
-  if (notification.duration > 0) {
+  const duration = notification.duration || 4000
+  if (duration > 0) {
     setTimeout(() => {
       removeNotification(id)
-    }, notification.duration)
+    }, duration)
   }
 }
 

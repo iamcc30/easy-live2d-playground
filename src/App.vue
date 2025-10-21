@@ -18,22 +18,10 @@ let resizeTimeout: number | null = null
 const isMobile = ref(false)
 const touchStartTime = ref(0)
 
-// 居中模型的辅助函数
-const centerModel = () => {
-  if (canvasRef.value) {
-    // 确保锚点始终在中心
-    live2DSprite.anchor.set(0.5, 0.5)
-
-    // 设置模型位置到画布中心
-    live2DSprite.x = canvasRef.value.clientWidth / 2
-    live2DSprite.y = canvasRef.value.clientHeight / 2
-  }
-}
 
 // 设置 Config 默认配置
-Config.MotionGroupIdle = 'Idle' // 设置默认的空闲动作组
-// Config.MouseFollow = false // 禁用鼠标跟随
-Config.CubismLoggingLevel = LogLevel.LogLevel_Off // 设置日志级别
+Config.MotionGroupIdle = 'Idle'
+Config.CubismLoggingLevel = LogLevel.LogLevel_Off
 
 // 创建Live2D精灵 并初始化
 const live2DSprite = new Live2DSprite()
@@ -112,14 +100,10 @@ onMounted(async () => {
   })
 
   if (canvasRef.value) {
-    // 移动端使用更低的分辨率倍数
     const pixelRatio = isMobile.value ? Math.min(window.devicePixelRatio, 2) : window.devicePixelRatio
 
     live2DSprite.width = canvasRef.value.clientWidth * pixelRatio
     live2DSprite.height = canvasRef.value.clientHeight * pixelRatio
-
-    // 使用居中函数设置模型位置
-    // centerModel()
 
     app.stage.addChild(live2DSprite)
 
@@ -148,17 +132,14 @@ onMounted(async () => {
     }
   }
 
-  // 监听窗口大小变化（带防抖）
+  // 监听窗口大小变化
   handleResize = () => {
     if (canvasRef.value) {
-      // 移动端使用更低的分辨率倍数
       const pixelRatio = isMobile.value ? Math.min(window.devicePixelRatio, 2) : window.devicePixelRatio
 
-      // 更新画布尺寸
       live2DSprite.width = canvasRef.value.clientWidth * pixelRatio
       live2DSprite.height = canvasRef.value.clientHeight * pixelRatio
 
-      // 重新渲染画布
       app.renderer.resize(canvasRef.value.clientWidth, canvasRef.value.clientHeight)
     }
   }
@@ -250,10 +231,6 @@ onUnmounted(() => {
   <!-- 错误通知组件 -->
   <ErrorNotification />
 
-  <!-- 音频诊断面板 (按 Ctrl+D 或 Cmd+D 显示) -->
-  <div class="diagnostics-overlay">
-    <AudioDiagnostics />
-  </div>
 </template>
 
 <style>

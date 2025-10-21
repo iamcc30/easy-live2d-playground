@@ -268,7 +268,9 @@ export const useChatStore = defineStore('chat', () => {
       )
     }
     else if (message.state === 'stop') {
-      isSpeaking.value = false
+      // Finish the audio stream to process any remaining chunks
+      console.log('🏁 TTS stream stopped, finishing remaining audio chunks...')
+      audioPlaybackService.finishStream()
       currentTTSText.value = ''
     }
   }

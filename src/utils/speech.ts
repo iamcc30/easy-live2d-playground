@@ -7,7 +7,7 @@ export interface SpeechRecognitionResult {
 }
 
 export class SpeechService {
-  private recognition: SpeechRecognition | null = null
+  private recognition: any = null
   private synthesis: SpeechSynthesis = window.speechSynthesis
   private voices: SpeechSynthesisVoice[] = []
 
@@ -20,7 +20,7 @@ export class SpeechService {
   private initSpeechRecognition() {
     try {
       if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
-        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
+        const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
         this.recognition = new SpeechRecognition()
 
         // 优化设置
@@ -81,7 +81,7 @@ export class SpeechService {
 
     this.recognition.lang = lang
 
-    this.recognition.onresult = (event) => {
+    this.recognition.onresult = (event: any) => {
       const results = event.results
       const result = results[results.length - 1]
       const transcript = result[0].transcript
@@ -94,7 +94,7 @@ export class SpeechService {
       })
     }
 
-    this.recognition.onerror = (event) => {
+    this.recognition.onerror = (event: any) => {
       const error = event.error
       let errorMessage = '语音识别错误'
 
